@@ -4,6 +4,8 @@ using POMDPs
 using POMDPTools
 using Test
 
+include("test_adaptive.jl")
+
 function test_state_indexing(pomdp::DroneSurveillancePOMDP, ss::Vector{DSState})
     for (i,s) in enumerate(states(pomdp))
         if s != ss[i]

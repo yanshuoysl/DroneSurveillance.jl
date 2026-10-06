@@ -2,7 +2,8 @@ using Random
 using DroneSurveillance
 using POMDPs
 using POMDPTools
-using POMDPGifs # Not included in extras
+using POMDPGifs
+import Cairo, Fontconfig # Enable Compose's PNG backend for GIF frames.
 
 pomdp = DroneSurveillancePOMDP()
 
