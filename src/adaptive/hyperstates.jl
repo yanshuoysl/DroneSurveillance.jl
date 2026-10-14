@@ -1,4 +1,4 @@
-# Augmented state s = (x, m, φ) for the adaptive robust POMDP.
+# Augmented state s = (r, m, φ), with robot configuration r = (x, y, ψ).
 # Include inside DroneSurveillanceAdaptive after DSState and the model are defined.
 # This file does not replace the existing model's state type or transition methods.
 
@@ -29,13 +29,13 @@ end
 
 all_fault_modes() = [mode_from_index(i) for i in 1:N_FAULT_MODES]
 
-"""No recovery and at most one newly activated fault per transition."""
+"""Membership in E: m ≼ m′ and ‖m′ - m‖₁ ≤ 1 (no fault recovery)."""
 function is_successor_mode(mode::FaultMode, next_mode::FaultMode)
     all(i -> !mode[i] || next_mode[i], 1:6) || return false
     return count(identity, next_mode) - count(identity, mode) <= 1
 end
 
-"""The current mode, followed by each mode with one additional fault."""
+"""𝓜(m): the current mode, followed by each mode with one additional fault."""
 function successor_modes(mode::FaultMode)
     successors = FaultMode[mode]
     for i in 1:6
@@ -56,7 +56,7 @@ is_grid_config(config::DSState) = all(>(0), config.quad)
 """
     CountKey(config, mode, action, next_config, next_mode)
 
-Index of φᵃ₍ₓ,ₘ₎,₍ₓ′,ₘ′₎. Configurations include position AND heading.
+Index of φ^a_{(r,m),(r′,m′)}. Robot configurations r and r′ include position and heading.
 Unsafe destinations use `UNSAFE_CONFIG`; successful destinations use the actual
 goal configuration. Counts and outcome labels are not part of the index.
 
@@ -111,7 +111,7 @@ DirichletCounts() = DirichletCounts(Dict{CountKey, Int}())
 count_value(phi::DirichletCounts, key::CountKey) =
     Base.Checked.checked_add(1, get(phi.increments, key, 0))
 
-"""Increment one feasible transition entry without changing the old snapshot."""
+"""Apply φ′ = φ + δ^a_{(r,m),(r′,m′)} without changing the old snapshot."""
 function increment_count(phi::DirichletCounts, key::CountKey)
     updated = DirichletCounts(phi.increments)
     increment = Base.Checked.checked_add(get(updated.increments, key, 0), 1)
@@ -125,9 +125,10 @@ end
     count_row(phi, config, mode, action, destinations)
 
 Return a row's Dirichlet parameter vector in the supplied destination order.
-Each destination is `(next_config, next_mode)`. The transition model supplies
-the complete feasible support for this row, including terminal outcomes where
-appropriate. No full transition table or count-state space is enumerated.
+Each destination `(next_config, next_mode)` represents a pair (r′, m′) in
+S(r, m, a). The transition model supplies this complete feasible successor set,
+including terminal outcomes where appropriate. No full transition table or
+count-state space is enumerated.
 """
 function count_row(phi::DirichletCounts, config::DSState, mode::FaultMode,
                    action::Integer, destinations)
@@ -148,8 +149,8 @@ Base.hash(phi::DirichletCounts, h::UInt) = hash(phi.increments, h)
     AdaptiveState(config, mode=NOMINAL_MODE, counts=DirichletCounts();
                   outcome=ACTIVE_STATE)
 
-Augmented state s = (x, m, φ). `config` is x, `mode` is m, and `counts` represents
-φ. `outcome` distinguishes active, successful terminal, and unsafe terminal
+Augmented state s = (r, m, φ). `config` is r = (x, y, ψ), `mode` is m, and `counts`
+represents φ. `outcome` distinguishes active, successful terminal, and unsafe terminal
 states; it is derived from the configuration and map by `adaptive_state`.
 
 Terminal states retain their mode and counts. The future transition model must

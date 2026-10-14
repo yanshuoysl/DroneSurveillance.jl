@@ -5,6 +5,7 @@ using POMDPTools
 using Test
 
 include("test_adaptive.jl")
+include("test_hdr.jl")
 
 function test_state_indexing(pomdp::DroneSurveillancePOMDP, ss::Vector{DSState})
     for (i,s) in enumerate(states(pomdp))

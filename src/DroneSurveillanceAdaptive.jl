@@ -7,9 +7,18 @@ using StaticArrays
 using Compose
 using Colors
 using Random
+using Distributions: Dirichlet, pdf
+using Statistics: quantile
 
 export DSPos, DSState, DSObservation, DroneSurveillancePOMDP, ACTIONS_DICT,
-       KnownCamera, OBS_CLASSES, observation_labels, visible_cells, random_obstacles
+       KnownCamera, OBS_CLASSES, observation_labels, visible_cells, random_obstacles,
+       AdaptiveState, AdaptiveOutcome, ACTIVE_STATE, GOAL_STATE, UNSAFE_STATE,
+       FaultMode, NOMINAL_MODE, N_FAULT_MODES, UNSAFE_CONFIG,
+       is_nominal, is_failed, mode_index, mode_from_index, all_fault_modes,
+       is_successor_mode, successor_modes, CountKey, DirichletCounts,
+       count_value, increment_count, count_row,
+       adaptive_state, initial_adaptive_state, is_unsafe, is_goal, is_terminal,
+       DirichletHDR, estimate_tau, build_row_hdr, contains
 
 const DSPos = SVector{2, Int64}
 const HEADINGS = (0, 90, 180, 270) # north, east, south, west; clockwise degrees
@@ -60,6 +69,9 @@ The field of view is shown in the rendering.
     terminal_state::DSState = DSState([-1, -1])
     discount_factor::Float64 = 0.95
 end
+
+include("adaptive/hyperstates.jl")
+include("adaptive/hdr.jl")
 
 POMDPs.isterminal(pomdp::DroneSurveillancePOMDP, s::DSState) = s == pomdp.terminal_state
 POMDPs.discount(pomdp::DroneSurveillancePOMDP) = pomdp.discount_factor

@@ -1,0 +1,12 @@
+Direct three-component Dirichlet 95% HDR; no grouping or projection
+Settings: K=10000, epsilon=0.05, seed=42, resolution=160
+Source: r=Main.HDRThreeInputVisualizationTest.DroneSurveillanceAdaptive.DSState([3, 2], 0), m=(false, false, false, false, false, false), action=forward
+Input counts: [2, 3, 2]
+Three illustrative outcomes, not the complete neighborhood support.
+No transition, count update, or episode is simulated.
+φ₁ = 2: r'=Main.HDRThreeInputVisualizationTest.DroneSurveillanceAdaptive.DSState([3, 2], 0), m'=(false, false, false, false, false, false)
+φ₂ = 3: r'=Main.HDRThreeInputVisualizationTest.DroneSurveillanceAdaptive.DSState([3, 3], 0), m'=(false, false, false, false, false, false)
+φ₃ = 2: r'=Main.HDRThreeInputVisualizationTest.DroneSurveillanceAdaptive.DSState([4, 2], 0), m'=(false, false, false, false, false, false)
+tau=0.7968749991416122
+Held-out HDR coverage=0.9515
+Region: f(θ;phi)>=tau. Boundary: f(θ;phi)=tau. Same test determines dot colors.
