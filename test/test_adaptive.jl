@@ -6,6 +6,20 @@ using POMDPTools
 include(joinpath(@__DIR__, "..", "src", "DroneSurveillanceAdaptive.jl"))
 include("adaptive_demo_route.jl")
 
+# POMDPTools' stock checker queries every global action at every state.
+# This model has state-dependent availability and rejects outward commands.
+function has_consistent_available_transitions(pomdp)
+    state_space = collect(states(pomdp))
+    for s in state_space, a in actions(pomdp, s)
+        d = transition(pomdp, s, a)
+        all(sp -> sp in state_space, support(d)) || return false
+        probabilities = [pdf(d, sp) for sp in state_space]
+        all(p -> 0 <= p <= 1, probabilities) || return false
+        sum(probabilities) ≈ 1 || return false
+    end
+    return true
+end
+
 @testset "DroneSurveillanceAdaptive" begin
     DS = DroneSurveillanceAdaptive
     rng = MersenneTwister(42)
@@ -60,7 +74,8 @@ include("adaptive_demo_route.jl")
     for (pos, heading, a) in (([1, 1], 0, 2), ([1, 1], 0, 3),
                               ([3, 4], 0, 1), ([3, 4], 90, 1),
                               ([1, 1], 180, 1), ([1, 1], 270, 1))
-        @test rand(rng, transition(pomdp, DS.DSState(pos, heading), a)) == pomdp.terminal_state
+        @test a ∉ actions(pomdp, DS.DSState(pos, heading))
+        @test_throws ArgumentError transition(pomdp, DS.DSState(pos, heading), a)
     end
     @test !isterminal(pomdp, rand(rng, transition(pomdp, DS.DSState([1, 1]), 5)))
     @test !isterminal(pomdp, rand(rng, transition(pomdp, DS.DSState([3, 4]), 6)))
@@ -73,7 +88,7 @@ include("adaptive_demo_route.jl")
     @test reward(pomdp, DS.DSState(pomdp.region_B), 5) == 1.0
     @test reward(pomdp, pomdp.terminal_state, 5) == 0.0
     @test discount(pomdp) == 0.95
-    @test has_consistent_transition_distributions(pomdp)
+    @test has_consistent_available_transitions(pomdp)
     @test has_consistent_observation_distributions(pomdp)
 
     @testset "Front-facing stochastic camera" begin
@@ -173,7 +188,7 @@ include("adaptive_demo_route.jl")
             s = DS.DSState(pos, heading)
             @test rand(rng, transition(local_model, s, a)) == s
         end
-        @test has_consistent_transition_distributions(blocked)
+        @test has_consistent_available_transitions(blocked)
         @test has_consistent_observation_distributions(blocked)
         @test render(blocked, (s=DS.DSState([2, 1]),)) !== nothing
         perfect = DS.DroneSurveillancePOMDP(obstacles=blocked.obstacles,
@@ -227,7 +242,7 @@ include("adaptive_demo_route.jl")
         @test !isterminal(pomdp, s)
     end
     @test s.quad == pomdp.region_B
-    policy = RandomPolicy(pomdp, rng=rng)
+    policy = RandomPolicy(pomdp, rng=rng, updater=DiscreteUpdater(pomdp))
     hist = simulate(HistoryRecorder(max_steps=10, rng=rng), pomdp, policy)
     @test length(hist) > 0
     @test render(pomdp, (s=s0,)) !== nothing

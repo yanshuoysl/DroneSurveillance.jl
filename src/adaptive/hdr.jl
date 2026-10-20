@@ -73,13 +73,36 @@ struct DirichletHDR{D<:Dirichlet}
 end
 
 """
+    build_row_hdr(pomdp, s, action; epsilon, n_samples=K, rng=Random.default_rng())
+
+Build an HDR over the complete action-dependent support S(r,m,a), using the
+map-aware count-row API. Impossible destinations have no Dirichlet coordinate.
+Source outcome labels must agree with the map; terminal sources have no row.
+"""
+function build_row_hdr(pomdp::DroneSurveillancePOMDP, s::AdaptiveState,
+                       action::Integer; epsilon::Real,
+                       n_samples::Integer=K, rng::AbstractRNG=Random.default_rng())
+    check_hdr_settings(epsilon, n_samples)
+    source = support_source(pomdp, s.config, s.mode, action)
+    s.outcome == source.outcome ||
+        throw(ArgumentError("source outcome is inconsistent with its configuration"))
+    destinations = feasible_successors(pomdp, s.config, s.mode, action)
+    phi_row = count_row(pomdp, s.counts, s.config, s.mode, action, destinations)
+    distribution = hdr_distribution(phi_row)
+    tau = estimate_tau(distribution; epsilon, n_samples, rng)
+    return DirichletHDR(distribution, destinations, Float64(epsilon), Int(n_samples), tau)
+end
+
+"""
     build_row_hdr(pomdp, s, action, successors;
                   epsilon, n_samples=K, rng=Random.default_rng())
 
 Extract φ_{r,m,a} from hyperstate `s`, then estimate its HDR threshold. The caller
 supplies the complete ordered support S(r,m,a), as `(next_config, next_mode)`
-pairs. This function checks map validity, mode degradation, and duplicate keys;
-action-specific locomotion support remains the transition model's responsibility.
+pairs. This low-level overload supports existing illustrative HDR fixtures: it
+checks map validity, mode degradation, and duplicate keys, but does NOT validate
+action-specific locomotion or completeness. Omit `successors` to construct a
+model row with validated action-dependent support.
 Unsafe destinations must use UNSAFE_CONFIG, not raw obstacle/outside positions.
 
 Counts are read from this particular hyperstate and never updated here. Terminal

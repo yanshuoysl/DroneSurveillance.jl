@@ -23,7 +23,7 @@ const ACTION = :forward
 const OBSTACLES = ((2, 3), (4, 4))
 # Actual phi values for this illustrative three-outcome transition row.
 # These are supplied counts, not probabilities, increments, or grouped counts.
-const DIRICHLET_INPUT = [2, 3, 2]
+const DIRICHLET_INPUT = [2,2,1] #[2, 3, 2]
 # One destination (r',m') for each input count, in the same order.
 # This reduced test support illustrates the HDR; it is not the full 140-entry row.
 const SUCCESSOR_INPUT = [
@@ -365,7 +365,14 @@ function make_figure(e, samples, curves)
         text = "$(PHI_LABELS[i]) = $(e.input_counts[i]): r'=($(config.quad[1]),$(config.quad[2]),$(config.heading)), m'=$(join(Int.(mode)))"
         push!(elements,label(45,1030+28(i-1),text;size=11))
     end
-    return compose(context(units=UnitBox(0,0,FIGURE_WIDTH,height)),reverse(elements)...)
+    # Inputs containing ones can shade thousands of clipped grid triangles.
+    # Compose's variadic compose() recurses once per child; attach them in a
+    # loop to keep stack depth bounded and preserve the existing paint order.
+    figure = context(units=UnitBox(0,0,FIGURE_WIDTH,height))
+    for element in Iterators.reverse(elements)
+        compose!(figure,element)
+    end
+    return figure
 end
 
 function write_report(e, samples)

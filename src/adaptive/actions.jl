@@ -6,5 +6,4 @@ const ACTIONS_DICT = Dict(:forward => 1, :backward => 2, :move_left => 3,
 const N_ACTIONS = length(ACTIONS_DICT)
 
 POMDPs.actions(pomdp::DroneSurveillancePOMDP) = 1:N_ACTIONS
-POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::DSState) = actions(pomdp)
 POMDPs.actionindex(pomdp::DroneSurveillancePOMDP, a::Int64) = a

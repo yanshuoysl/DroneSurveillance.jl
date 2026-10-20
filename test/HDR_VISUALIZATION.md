@@ -1,88 +1,98 @@
-# Given-step manual Dirichlet HDR test
+# Supplied-parameter Dirichlet HDR test
 
 From the repository root, run:
 
 ```bash
-julia --project=test test/test_hdr_visualization.jl
+julia --project=test --startup-file=no test/test_hdr_visualization.jl
 ```
 
-The test takes one transition row at a given robot state,
-computes its original full-dimensional HDR, and plots one ternary projection.
-It executes no robot transition, count increment, or full simulation. There is
-no prior/after-update comparison. It writes
-`test/output/hdr/hdr_simplex.png`, `hdr_simplex.svg`, `samples.csv`, and `report.txt`.
-Generated files are ignored by Git and regenerated on each run. The standalone
-test is intentionally separate from the normal unit-test runner because it
-renders figures and uses the test environment's graphics dependencies.
+Edit the parameter list near the top of `test/test_hdr_visualization.jl`:
 
-## Settings
+```julia
+const DIRICHLET_INPUT = [2.0, 3.0, 2.0, 1.0, 1.0, 2.0]
+```
 
-Edit the constants at the top of `test_hdr_visualization.jl`:
+The list itself supplies phi, and its length determines the dimension. There is
+no drone environment, state, mode, action, successor enumeration, simulated count
+input, or count update. The original HDR estimator is reused without changing
+production simulator files. Loading the adaptive module only makes its existing
+Dirichlet/HDR functions available; no POMDP environment is instantiated.
 
-- `K = 10_000`, `EPSILON = 0.05`, and `SEED` control threshold estimation.
-- `COUNT_SEED = 42` and `N_TWOS = 10` control the synthetic phi input. The
-  example starts with ones and randomly selects ten distinct entries to set to
-  two. These twos simulate a supplied count snapshot, not executed transitions.
-- `ROBOT_POSITION`, `HEADING`, `MODE`, and `ACTION` select the source row.
-- `GRID_SIZE`, start/goal positions, and `OBSTACLES` define the map.
-- `DIRICHLET_INPUT = nothing` generates counts with the settings above. For
-  manual input, replace `nothing` with the actual vector of integer counts >= 1,
-  one per destination. These are neither probabilities nor increments. The
-  projection formula also requires parameters >= 1.
-- `SUCCESSOR_INPUT = nothing` enumerates the current tile, north, east, south,
-  and west neighbors, each with headings 0, 90, 180, and 270, each paired with
-  every feasible successor mode. At nominal mode this gives 5 × 4 × 7 = 140
-  entries. The default source (3,2) has four free neighbors in the test map.
-  This explanatory support requires five free tiles; it rejects boundary or
-  obstacle neighbors rather than silently changing the dimension. It does not
-  implement the production transition model. To supply another support, set
-  `SUCCESSOR_INPUT` to a list of `(position=(x,y), heading=..., mode=(...))`
-  entries. The count vector and successor list must have equal lengths.
-- `GROUPS = nothing` greedily balances the supplied count totals across three
-  groups. Set three explicit index lists to choose your own partition. At least
-  three distinct successor entries are needed for a triangular visualization.
-- `GRID_RESOLUTION` controls contour detail; `PLOT_SAMPLES` controls visible dots.
+## Parameters and settings
 
-To test a different interior location or an existing fault, change
-`ROBOT_POSITION`, `HEADING`, and `MODE`. The generated support follows those
-settings; with k existing faults its dimension is 20 × (7-k). For other support
-definitions, supply matching destination entries and counts explicitly.
-Destination modes must preserve active faults and add at most one new fault;
-their configurations must be valid free cells or the unsafe sentinel position
-`(-1,-1)` with heading 0. Repeated modes with different configurations are allowed.
+- Supply at least three finite real parameters, each >= 1. Noninteger values such
+  as `1.5` are accepted and preserved. These are Dirichlet parameters, not
+  normalized probabilities. The current projection method does not support
+  parameters below one, although such values are valid in a general Dirichlet.
+- `K = 10_000`, `EPSILON = 0.05`, and `SEED = 42` control the original PDF-based
+  Monte Carlo threshold. The code draws theta from Dir(phi), evaluates the PDF,
+  and calls `quantile(densities, EPSILON)` with the existing interpolation rule.
+- `VALIDATION_SAMPLES = 10_000` specifies a separate sample batch, using seed
+  `SEED + 1`. `PLOT_SAMPLES = 450` selects the first samples from that batch for
+  drawing; the reported coverage uses the entire validation batch.
+- `GRID_RESOLUTION = 160` controls boundary detail. The existing ray/bisection or
+  contour-grid method is retained, depending on the group exponents.
+- With exactly three parameters and no group override, the plot uses the three
+  probability components directly, in their original order. No aggregation is
+  necessary, and displayed HDR membership matches the original membership.
+- For longer vectors, `GROUPING = :density` keeps parameter-one entries in group
+  3 and splits parameters above one into the first two groups by exponent total
+  `phi[i]-1`. The rule uses only the input parameters, not sample labels. With
+  only one parameter above one it occupies group 1, and the parameter-one entries
+  are split between the remaining groups. With no parameter-one entries or a
+  flat prior, the existing balanced partition is the fallback.
+- `GROUPING = :balanced` restores the equal-parameter-total strategy.
+- `GROUPS = nothing` uses those defaults. Supply three nonempty index lists,
+  such as `[[1,2], [3,6], [4,5]]`, to choose your own grouping. The lists must
+  partition the parameter indices exactly once. This also permits reordering
+  the three components when the supplied dimension is three.
 
-The default input contains 130 ones and ten twos, totaling 150 counts. Automatic
-grouping gives three groups with total count 50 each. `report.txt` records all
-140 destinations, their count values, and their group memberships. The figure
-shows the first ten destination labels to keep the plot compact. With so few
-twos in a high-dimensional row, the projection can cover almost the whole
-triangle even though the original HDR has approximately 95% posterior mass.
-For a flat full Dirichlet distribution, set `N_TWOS = 0` with generated input.
-The green region then fills the triangle.
+For example, `[2.0, 3.0, 2.0]` produces a direct three-component HDR.
+`[1.5, 2.25, 3.0, 1.0]` tests fractional parameters and three-group projection.
+A list of all ones produces constant original density, so the density-threshold
+region includes the entire simplex, with 100% coverage rather than exactly 95%.
+The existing estimator reports an error if sampled raw PDF values overflow or
+underflow; this revision does not change that numerical policy or use log PDFs.
 
-## What is being tested
+## Outputs
 
-The test uses the real adaptive map and hyperstate/count/HDR helpers. It stores
-each supplied count as `phi[key] - 1` in the existing sparse representation, so
-reading the row returns the input vector exactly. This storage conversion is
-not a count update. Other, unprovided rows retain their implicit all-one counts.
-No action is executed and no fault timing or locomotion model is assumed.
-Production simulator source files are unchanged.
+Each run regenerates files under `test/output/hdr/`:
 
-The original row's PDF values and `quantile` determine its threshold. No grouped
-Dirichlet PDF or second threshold is used. For each triangle point, the helper
-maximizes the original PDF over all compatible within-group allocations. Green
-means that at least one allocation is in the original HDR. The interior black
-line traces `M(q) = tau`. When every group has a positive total exponent
-`sum(phi[i]-1)`, the projected region is convex with an interior mode. The helper
-traces rays from that mode toward the triangle perimeter and bisects each ray
-using the original PDF threshold. This resolves boundaries close to the edges
-without coarse density interpolation. Other cases use the existing contour grid;
-admitted simplex-edge portions are also drawn black. `GRID_RESOLUTION` controls
-the number of perimeter samples or the fallback grid resolution.
+- `hdr_simplex.png` and `hdr_simplex.svg`: parameter summary, simplex samples,
+  green uncertainty region, and black boundary.
+- `hdr_density.png` and `hdr_density.svg`: the same visible samples, displayed by
+  their original density score `f/(f+tau)`.
+- `samples.csv`: displayed coordinates, original membership, projected membership,
+  raw density, display score, and all original theta components.
+- `report.txt`: the supplied vector, dimension, group index mapping, threshold,
+  validation coverage, and grouping comparison where applicable.
 
-Dark dots belong to the original HDR; orange rings do not. An orange ring can
-project inside green because a different hidden allocation at the same grouped
-coordinates may belong to the HDR. The plot reports original and projected
-held-out coverage separately. The initial all-one full prior has constant density
-and its projected uncertainty set is the entire triangle, with 100% coverage.
+Generated files are ignored by Git. The standalone test is separate from the
+normal unit-test runner because it renders figures and requires the test
+project's graphics dependencies. Existing saved copies in other folders are not
+modified by this script.
+
+## Interpreting the figures
+
+The original distribution and threshold always define the uncertainty set:
+
+    U = {theta in the original simplex : f(theta; phi) >= tau}.
+
+Dark points satisfy this original HDR criterion; orange rings do not. The green
+area is its three-group projection when the vector has more than three entries.
+It includes a grouped point if at least one compatible original vector lies in
+U. Its interior boundary is `M(q) = tau`, with admitted simplex-edge pieces also
+part of the boundary. No grouped Dirichlet PDF or second threshold is computed.
+
+Projection can hide differences between original vectors, so an orange point
+may lie inside the green shading. A grouping change can reduce overlap but
+cannot guarantee separation. The report compares balanced and density-based
+strategies on exactly the same independent validation samples. For a
+three-component input, singleton groups preserve all coordinates and the
+comparison reports the direct view instead.
+
+The separate density diagnostic uses a bounded display coordinate `f/(f+tau)`:
+green points have score >= 0.5 and orange points have score below 0.5. This score
+is not a probability or a simplex coordinate, and changes neither the original
+PDF nor the estimated threshold. It shows the original membership without
+losing the density information through grouping.

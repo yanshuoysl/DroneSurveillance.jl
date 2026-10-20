@@ -5,7 +5,15 @@ using POMDPTools
 using Test
 
 include("test_adaptive.jl")
+include("test_successors.jl")
+include("test_boundary_actions.jl")
 include("test_hdr.jl")
+include("test_locomotion.jl")
+include("test_parameter_update.jl")
+include("test_adaptive_transition.jl")
+include("test_adaptive_reward.jl")
+include("test_adaptive_termination.jl")
+include("test_fault_schedule.jl")
 
 function test_state_indexing(pomdp::DroneSurveillancePOMDP, ss::Vector{DSState})
     for (i,s) in enumerate(states(pomdp))

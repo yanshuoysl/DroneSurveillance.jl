@@ -16,8 +16,15 @@ export DSPos, DSState, DSObservation, DroneSurveillancePOMDP, ACTIONS_DICT,
        FaultMode, NOMINAL_MODE, N_FAULT_MODES, UNSAFE_CONFIG,
        is_nominal, is_failed, mode_index, mode_from_index, all_fault_modes,
        is_successor_mode, successor_modes, CountKey, DirichletCounts,
+       feasible_successors, is_feasible_successor,
        count_value, increment_count, count_row,
+       locomotion_mode_uncertainty, locomotion_mode_transition,
+       parameter_update_transition,
+       adaptive_reward,
+       posterior_predictive_row, adaptive_transition, robust_transition,
        adaptive_state, initial_adaptive_state, is_unsafe, is_goal, is_terminal,
+       termination_reason, simulate_adaptive,
+       sample_fault_schedule,
        DirichletHDR, estimate_tau, build_row_hdr, contains
 
 const DSPos = SVector{2, Int64}
@@ -51,8 +58,9 @@ include("adaptive/obstacles.jl")
 Drone surveillance variant without a ground agent. The drone starts at region A,
 observes noisy classes for the three cells immediately ahead, and earns +1 for
 occupying region B. Its position and heading are not part of the camera output. Movement
-is relative to the heading; rotations change the heading in place. Leaving the grid
-enters an absorbing terminal state. Two obstacles are randomly placed by default,
+is relative to the heading; rotations change the heading in place. Commands that
+would leave the grid are invalid and excluded from state-dependent action sets.
+Two obstacles are randomly placed by default,
 excluding the start and goal. Moving into an obstacle leaves the state unchanged.
 The field of view is shown in the rendering.
 """
@@ -71,47 +79,176 @@ The field of view is shown in the rendering.
 end
 
 include("adaptive/hyperstates.jl")
-include("adaptive/hdr.jl")
 
 POMDPs.isterminal(pomdp::DroneSurveillancePOMDP, s::DSState) = s == pomdp.terminal_state
+POMDPs.isterminal(pomdp::DroneSurveillancePOMDP, s::AdaptiveState) = is_terminal(s)
 POMDPs.discount(pomdp::DroneSurveillancePOMDP) = pomdp.discount_factor
 POMDPs.reward(pomdp::DroneSurveillancePOMDP, s::DSState, a::Int64) =
     !isterminal(pomdp, s) && s.quad == pomdp.region_B ? 1.0 : 0.0
 
 include("adaptive/states.jl")
 include("adaptive/actions.jl")
+include("adaptive/faults.jl")
+include("adaptive/successors.jl")
+
+# Boundary feasibility depends only on configuration, never on hidden fault flags.
+function command_in_bounds(pomdp::DroneSurveillancePOMDP, config::DSState, a::Integer)
+    1 <= a <= N_ACTIONS || return false
+    x, y = commanded_config(config, a).quad
+    return 1 <= x <= pomdp.size[1] && 1 <= y <= pomdp.size[2]
+end
+
+"""
+    actions(pomdp, s::Union{DSState,AdaptiveState})
+
+Return commands whose intended destination is inside the grid. All six action
+IDs remain in `actions(pomdp)` for indexing. An outward command is unavailable
+even if its uncertain outcome could be staying put. Rotations remain available
+at every active cell. Obstacle-directed commands remain available; collision is
+handled by the transition model. No fault mode or count is used in this check.
+Terminal states have no available actions.
+"""
+function POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::DSState)
+    isterminal(pomdp, s) && return Int64[]
+    x, y = s.quad
+    1 <= x <= pomdp.size[1] && 1 <= y <= pomdp.size[2] ||
+        throw(ArgumentError("source configuration must be inside the grid"))
+    return Int64[a for a in actions(pomdp) if command_in_bounds(pomdp, s, a)]
+end
+
+function POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::AdaptiveState)
+    source = adaptive_state(pomdp, s.config, s.mode)
+    s.config == source.config && s.outcome == source.outcome ||
+        throw(ArgumentError("source configuration or outcome is inconsistent with the map"))
+    is_terminal(source) && return Int64[]
+    return actions(pomdp, s.config)
+end
+
+"""
+    actions(pomdp, b::DiscreteBelief)
+
+Commands valid for every configuration with positive belief probability.
+This permits boundary-safe selection without revealing the true configuration
+or fault mode. Terminal hypotheses do not restrict commands for active ones;
+an entirely terminal belief has no available actions.
+"""
+function POMDPs.actions(pomdp::DroneSurveillancePOMDP, b::DiscreteBelief)
+    available = collect(actions(pomdp))
+    has_active = false
+    for s in support(b)
+        pdf(b, s) > 0 || continue
+        isterminal(pomdp, s) && continue
+        has_active = true
+        intersect!(available, actions(pomdp, s))
+    end
+    return has_active ? available : Int64[]
+end
+
+include("adaptive/hdr.jl")
+include("adaptive/locomotion.jl")
+include("adaptive/parameter_update.jl")
+include("adaptive/transition.jl")
+include("adaptive/reward.jl")
 include("adaptive/observation.jl")
+
+"""Reuse the camera for active hyperstates; goal/collision states emit the terminal observation."""
+function POMDPs.observation(pomdp::DroneSurveillancePOMDP, a::Int64, sp::AdaptiveState)
+    isterminal(pomdp, sp) && return Deterministic(TERMINAL_OBSERVATION)
+    return observation(pomdp, a, sp.config)
+end
+
+"""
+    termination_reason(pomdp, s::AdaptiveState, steps, H)
+
+Return `:goal`, `:collision`, `:horizon`, or `nothing` while execution may
+continue. `steps` counts completed actions, including stays and rotations.
+Goal/collision take precedence over the horizon when they occur on action H.
+H is a simulation budget, not part of the hyperstate or Dirichlet count key.
+"""
+function termination_reason(pomdp::DroneSurveillancePOMDP, s::AdaptiveState,
+                            steps::Integer, H::Integer)
+    steps >= 0 || throw(ArgumentError("steps must be nonnegative"))
+    H >= 0 || throw(ArgumentError("H must be nonnegative"))
+    source = adaptive_state(pomdp, s.config, s.mode)
+    s.config == source.config && s.outcome == source.outcome ||
+        throw(ArgumentError("state configuration or outcome is inconsistent with the map"))
+    is_goal(s) && return :goal
+    is_unsafe(s) && return :collision
+    steps >= H && return :horizon
+    return nothing
+end
+
+"""
+    simulate_adaptive(pomdp, policy, belief_updater, initial_belief;
+                      H, transition_kernel,
+                      initial_state=initial_adaptive_state(pomdp),
+                      rng=Random.default_rng())
+
+Run the augmented drone example until goal, collision, or H completed actions.
+The required callable `transition_kernel(pomdp, s, a)` returns a distribution
+over complete next AdaptiveStates, including the parameter update. For HDR
+constraints, supply a callable that selects theta and calls robust_transition.
+There is no implicit posterior-mean or worst-case row selection.
+
+Only the environment kernel receives the latent hyperstate. The policy receives
+the supplied belief; `update(belief_updater, b, a, o)` receives its camera
+observation, never the sampled true mode or counts. The caller supplies a belief
+that is already initialized. A scripted PlaybackPolicy may use NothingUpdater
+and `initial_belief=nothing`; this does not implement Bayesian belief learning.
+The policy must respect boundary availability; invalid commands raise an error
+before the transition kernel is called.
+
+Every executed transition records (t,s,a,sp,o,r,b,bp) in a POMDPTools.SimHistory.
+The final reward, observation, belief update, and count update are retained.
+Initial terminal states and H=0 execute no actions. Returned fields are history,
+final_state, final_belief, reason, steps, terminated (goal/collision), and
+truncated (horizon). The history contains hidden states for evaluation only.
+"""
+function simulate_adaptive(pomdp::DroneSurveillancePOMDP, policy, belief_updater,
+                           initial_belief; H::Integer, transition_kernel,
+                           initial_state::AdaptiveState=initial_adaptive_state(pomdp),
+                           rng::AbstractRNG=Random.default_rng())
+    s, b = initial_state, initial_belief
+    steps = 0
+    records = NamedTuple[]
+    reason = termination_reason(pomdp, s, steps, H)
+    while reason === nothing
+        a = action(policy, b)
+        a in actions(pomdp, s) ||
+            throw(ArgumentError("policy selected an unavailable action: $a"))
+        a = Int64(a)
+        sp = rand(rng, transition_kernel(pomdp, s, a))
+        r = adaptive_reward(pomdp, s, a, sp)
+        o = rand(rng, observation(pomdp, a, sp))
+        bp = update(belief_updater, b, a, o)
+        steps += 1
+        push!(records, (; t=steps, s, a, sp, o, r, b, bp))
+        s, b = sp, bp
+        reason = termination_reason(pomdp, s, steps, H)
+    end
+    history = POMDPTools.SimHistory(records, discount(pomdp), nothing, nothing)
+    return (; history, final_state=s, final_belief=b, reason, steps,
+            terminated=reason in (:goal, :collision), truncated=reason == :horizon)
+end
 
 function POMDPs.transition(pomdp::DroneSurveillancePOMDP, s::DSState, a::Int64)
     1 <= a <= N_ACTIONS || throw(ArgumentError("action must be an integer from 1 to $N_ACTIONS"))
     isterminal(pomdp, s) && return Deterministic(pomdp.terminal_state)
-    if a == ACTIONS_DICT[:rotate_clockwise]
-        return Deterministic(DSState(s.quad, mod(s.heading + 90, 360)))
-    elseif a == ACTIONS_DICT[:rotate_counterclockwise]
-        return Deterministic(DSState(s.quad, mod(s.heading - 90, 360)))
-    end
-
-    forward = HEADING_DIRS[div(s.heading, 90) + 1]
-    direction = if a == ACTIONS_DICT[:forward]
-        forward
-    elseif a == ACTIONS_DICT[:backward]
-        -forward
-    elseif a == ACTIONS_DICT[:move_left]
-        DSPos(-forward[2], forward[1])
-    else # move right
-        DSPos(forward[2], -forward[1])
-    end
-    quad = s.quad + direction
-    if !(1 <= quad[1] <= pomdp.size[1] && 1 <= quad[2] <= pomdp.size[2])
-        return Deterministic(pomdp.terminal_state)
-    end
+    command_in_bounds(pomdp, s, a) ||
+        throw(ArgumentError("action would move outside the grid boundary"))
+    attempted = commanded_config(s, a)
+    quad = attempted.quad
     quad in pomdp.obstacles && return Deterministic(s)
-    return Deterministic(DSState(quad, s.heading))
+    return Deterministic(attempted)
 end
 
 function POMDPTools.render(pomdp::DroneSurveillancePOMDP, step)
     nx, ny = pomdp.size
     s = get(step, :sp, get(step, :s, nothing))
+    if s isa AdaptiveState
+        # Keep the drone visible at the goal; unsafe states have no grid pose.
+        s = is_unsafe(s) ? nothing : s.config
+    end
     cells = []
     for x in 1:nx, y in 1:ny
         pos = DSPos(x, y)

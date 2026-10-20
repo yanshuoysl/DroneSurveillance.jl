@@ -4,7 +4,9 @@
 
 """
 Six fault flags, ordered forward, backward, left, right, clockwise rotation,
-counterclockwise rotation. `true` means the corresponding action is frozen.
+counterclockwise rotation. `true` marks the corresponding action's fault flag.
+The learned transition support retains both staying and commanded motion for
+every admissible next mode; a flag does not deterministically select the outcome.
 """
 const FaultMode = NTuple{6, Bool}
 const NOMINAL_MODE = ntuple(_ -> false, 6)
@@ -12,7 +14,7 @@ const N_FAULT_MODES = 2^length(NOMINAL_MODE)
 
 is_nominal(mode::FaultMode) = mode == NOMINAL_MODE
 
-"""Whether the action is frozen; action IDs follow `adaptive/actions.jl`."""
+"""Whether the action's fault flag is set; IDs follow `adaptive/actions.jl`."""
 function is_failed(mode::FaultMode, action::Integer)
     1 <= action <= length(mode) || throw(ArgumentError("action must be from 1 to 6"))
     return mode[action]
@@ -47,7 +49,7 @@ end
 
 @enum AdaptiveOutcome ACTIVE_STATE GOAL_STATE UNSAFE_STATE
 
-# All obstacle entries and boundary exits share this unsafe configuration.
+# Obstacle entries use this unsafe configuration. Outward commands are invalid.
 # Goal configurations keep their actual grid position and heading.
 const UNSAFE_CONFIG = DSState((-1, -1), 0)
 
@@ -60,9 +62,9 @@ Index of φ^a_{(r,m),(r′,m′)}. Robot configurations r and r′ include posit
 Unsafe destinations use `UNSAFE_CONFIG`; successful destinations use the actual
 goal configuration. Counts and outcome labels are not part of the index.
 
-Checks action IDs and irreversible mode evolution. The transition model must
-additionally check map-dependent and locomotion support: this type does not
-assume which positive grid configurations are reachable under an action.
+This low-level constructor checks action IDs and irreversible mode evolution.
+Use `CountKey(pomdp, ...)` to additionally validate map- and action-dependent
+support. This storage constructor alone does not establish physical feasibility.
 """
 struct CountKey
     config::DSState
@@ -107,11 +109,11 @@ end
 
 DirichletCounts() = DirichletCounts(Dict{CountKey, Int}())
 
-"""Actual Dirichlet count of an entry in the model's feasible support."""
+"""Read a storage entry (implicit prior 1); use `count_value(pomdp, phi, key)` to validate feasibility."""
 count_value(phi::DirichletCounts, key::CountKey) =
     Base.Checked.checked_add(1, get(phi.increments, key, 0))
 
-"""Apply φ′ = φ + δ^a_{(r,m),(r′,m′)} without changing the old snapshot."""
+"""Increment a storage key without mutation; use `increment_count(pomdp, phi, key)` to validate support."""
 function increment_count(phi::DirichletCounts, key::CountKey)
     updated = DirichletCounts(phi.increments)
     increment = Base.Checked.checked_add(get(updated.increments, key, 0), 1)
@@ -126,9 +128,9 @@ end
 
 Return a row's Dirichlet parameter vector in the supplied destination order.
 Each destination `(next_config, next_mode)` represents a pair (r′, m′) in
-S(r, m, a). The transition model supplies this complete feasible successor set,
-including terminal outcomes where appropriate. No full transition table or
-count-state space is enumerated.
+S(r, m, a). This low-level overload trusts the supplied destinations; use
+`count_row(pomdp, phi, config, mode, action)` for the complete validated support.
+No full transition table or count-state space is enumerated.
 """
 function count_row(phi::DirichletCounts, config::DSState, mode::FaultMode,
                    action::Integer, destinations)
@@ -153,8 +155,9 @@ Augmented state s = (r, m, φ). `config` is r = (x, y, ψ), `mode` is m, and `co
 represents φ. `outcome` distinguishes active, successful terminal, and unsafe terminal
 states; it is derived from the configuration and map by `adaptive_state`.
 
-Terminal states retain their mode and counts. The future transition model must
-make them absorbing and increment the count for entry into a terminal outcome.
+Terminal states retain their mode and counts. The separate parameter-update
+factor and combined kernels increment the entry count once and preserve counts
+on subsequent absorbing transitions.
 There is no finite enumeration of all count vectors.
 """
 struct AdaptiveState
@@ -184,9 +187,11 @@ is_terminal(s::AdaptiveState) = s.outcome != ACTIVE_STATE
 """
     adaptive_state(pomdp, config, mode=NOMINAL_MODE, counts=DirichletCounts())
 
-Construct a map-aware augmented state. Obstacle entries and boundary exits are
-unsafe; region B is a successful terminal configuration. This classifies an
-outcome only; it does not implement movement, fault dynamics, or count updates.
+Construct a map-aware augmented state. Obstacle cells are unsafe; region B is a
+successful terminal configuration. Outside coordinates are defensively
+canonicalized to unsafe, but outward commands are invalid in the transition
+model. This classifies an outcome only; it does not implement movement, fault
+dynamics, or count updates.
 """
 function adaptive_state(pomdp::DroneSurveillancePOMDP, config::DSState,
                         mode::FaultMode=NOMINAL_MODE,
@@ -200,9 +205,9 @@ function adaptive_state(pomdp::DroneSurveillancePOMDP, config::DSState,
     return AdaptiveState(config, mode, counts; outcome=outcome)
 end
 
-"""Known initial state: region A, north (0°), nominal mode, all-one counts."""
+"""Known initial state: region A, configured initial heading, nominal mode, all-one counts."""
 function initial_adaptive_state(pomdp::DroneSurveillancePOMDP)
-    s = adaptive_state(pomdp, DSState(pomdp.region_A, 0))
+    s = adaptive_state(pomdp, DSState(pomdp.region_A, pomdp.initial_heading))
     is_unsafe(s) && throw(ArgumentError("initial position must be a free grid cell"))
     return s
 end

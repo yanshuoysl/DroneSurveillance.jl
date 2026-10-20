@@ -1,6 +1,6 @@
 # Run from the repository root:
 # julia --project=test test/test_hdr_visualization.jl
-# Standalone given-step snapshot; no transition or count update is executed.
+# Standalone supplied-parameter HDR test; no environment or count simulation.
 module HDRVisualizationTest
 
 using Random
@@ -9,31 +9,17 @@ using Random
 const K = 10_000
 const EPSILON = 0.05
 const SEED = 42
-const COUNT_SEED = 42
-# Simulate phi for this given-step example: randomly choose N_TWOS entries
-# to have count 2; all other entries have count 1. No transitions are simulated.
-const N_TWOS = 10
+# Edit this list to specify phi directly. Its length determines the dimension.
+# Real values >= 1 are supported by the existing projection method.
+const DIRICHLET_INPUT = [4.0, 10.0, 7.0, 9.0, 7.0]
 const GRID_RESOLUTION = 160
 const VALIDATION_SAMPLES = 10_000
 const PLOT_SAMPLES = 450
-const GRID_SIZE = (5, 5)
-const START_POSITION = (1, 1)
-const GOAL_POSITION = (5, 5)
-const ROBOT_POSITION = (3, 2)
-const HEADING = 0
-const MODE = (false, false, false, false, false, false)
-const ACTION = :forward
-const OBSTACLES = ((2, 3), (4, 4))
-# nothing generates simulated counts using COUNT_SEED and N_TWOS above.
-# Or supply actual integer counts >= 1 for ONE row (r,m,a), in successor order.
-const DIRICHLET_INPUT = nothing
-# nothing enumerates current/north/east/south/west tiles, each with headings
-# 0/90/180/270 and all feasible successor modes.
-# This example requires five free tiles; it does not define production dynamics.
-# Or supply [(position=(...), heading=..., mode=(...)), ...] explicitly.
-const SUCCESSOR_INPUT = nothing
-# Set three explicit index lists to choose your own groups.
-# nothing balances the supplied count totals across three groups.
+# :density separates counts > 1 from counts == 1, instead of equalizing totals.
+# :balanced restores the previous grouping. Neither guarantees class separation.
+const GROUPING = :density
+# Set three explicit index lists to override GROUPING, or leave nothing.
+# Exactly three parameters use [[1],[2],[3]] directly unless overridden here.
 const GROUPS = nothing
 const OUTPUT_DIR = joinpath(@__DIR__, "output", "hdr")
 # ----------------------------------------------------------------------------
@@ -52,64 +38,95 @@ const DS = DroneSurveillanceAdaptive
 
 include("hdr_projection_helpers.jl")
 
-"""Example Cartesian support: five free tiles × four headings × successor modes."""
-function neighborhood_successors(pomdp, config, mode)
-    x, y = config.quad
-    positions = [(x, y), (x, y + 1), (x + 1, y), (x, y - 1), (x - 1, y)]
-    all(p -> 1 <= p[1] <= pomdp.size[1] && 1 <= p[2] <= pomdp.size[2] &&
-             !(DSPos(p) in pomdp.obstacles), positions) ||
-        throw(ArgumentError("the five-tile example requires an interior source with four free neighbors; choose another position or supply SUCCESSOR_INPUT"))
-    return [(DSState(position, heading), next_mode)
-            for position in positions for heading in (0, 90, 180, 270)
-            for next_mode in successor_modes(mode)]
+"""
+Group by the exponents in f(theta;phi) ∝ product(theta[i]^(phi[i]-1)).
+Keep count-one entries together, since their exponents are zero; split the
+remaining entries between two groups by exponent total. This uses only counts,
+never the validation labels, and does not change the original HDR membership.
+"""
+function density_groups(counts)
+    length(counts) >= 3 || throw(ArgumentError("at least three parameters are needed"))
+    all(a -> isfinite(a) && a >= 1, counts) ||
+        throw(ArgumentError("grouping requires finite counts >= 1"))
+    informative = sort(findall(>(1), counts); by=i -> (1-counts[i], i))
+    neutral = findall(==(1), counts)
+    if length(informative) >= 2 && !isempty(neutral)
+        groups = [Int[], Int[], neutral]
+        weights = zeros(2)
+        for i in informative
+            g = argmin(weights)
+            push!(groups[g], i)
+            weights[g] += counts[i]-1
+        end
+        foreach(sort!, groups)
+        return validate_groups(groups, length(counts))
+    elseif length(informative) == 1 && length(neutral) >= 2
+        return validate_groups([informative, neutral[1:2:end], neutral[2:2:end]], length(counts))
+    end
+    # With no count-one entries, or a flat prior, use the existing partition.
+    return balanced_groups(counts)
 end
 
-"""Generate a synthetic phi snapshot; never execute transitions or update counts."""
-function simulated_counts(dimension; n_twos=N_TWOS, seed=COUNT_SEED)
-    0 <= n_twos <= dimension || throw(ArgumentError("N_TWOS must be between 0 and the row dimension"))
-    counts = ones(Int, dimension)
-    selected = randperm(MersenneTwister(seed), dimension)[1:n_twos]
-    counts[selected] .= 2
-    return counts
+"""Bounded display of original density: f/(f+tau), with HDR cutoff at 1/2.
+This is a plotting coordinate, not a probability or a replacement HDR model.
+"""
+function density_score(value, tau)
+    if value >= tau
+        return inv(1 + tau/value)
+    end
+    ratio = value/tau
+    return ratio/(1+ratio)
 end
 
-"""Store supplied row counts directly in a hyperstate, without updating them."""
-function manual_snapshot(pomdp, config, mode, action, successors, dirichlet_input)
-    length(dirichlet_input) == length(successors) ||
-        throw(ArgumentError("DIRICHLET_INPUT must have one count per SUCCESSOR_INPUT entry"))
-    length(dirichlet_input) >= 3 ||
-        throw(ArgumentError("a ternary visualization needs at least three successor entries"))
-    all(a -> a isa Real && isfinite(a) && a >= 1 && isinteger(a), dirichlet_input) ||
-        throw(ArgumentError("DIRICHLET_INPUT must contain integer counts >= 1"))
-    source = adaptive_state(pomdp, config, mode)
-    is_terminal(source) && throw(ArgumentError("choose a nonterminal source configuration"))
-    keys = [CountKey(source.config, source.mode, action, rp, mp) for (rp, mp) in successors]
-    length(unique(keys)) == length(keys) || throw(ArgumentError("successor entries must be distinct"))
-    # DirichletCounts stores phi-1 internally; this conversion does not simulate
-    # observations. count_value(phi,key) is exactly the supplied phi entry.
-    counts = DirichletCounts(Dict(key => Int(a) - 1 for (key, a) in zip(keys, dirichlet_input)))
-    return adaptive_state(pomdp, source.config, source.mode, counts)
+"""The supplied Dirichlet distribution and its continuous HDR threshold.
+This test-only container has no robot state, hyperstate, or successor metadata.
+"""
+struct ParameterHDR{D}
+    distribution::D
+    epsilon::Float64
+    n_samples::Int
+    tau::Float64
 end
 
-function make_experiment(; dirichlet_input=DIRICHLET_INPUT, successor_input=SUCCESSOR_INPUT,
-                         groups_input=GROUPS)
-    pomdp = DroneSurveillancePOMDP(size=GRID_SIZE, region_A=DSPos(START_POSITION),
-        region_B=DSPos(GOAL_POSITION), obstacles=DSPos[DSPos(p) for p in OBSTACLES])
-    action = ACTIONS_DICT[ACTION]
-    config = DSState(ROBOT_POSITION, HEADING)
-    successors = isnothing(successor_input) ? neighborhood_successors(pomdp, config, MODE) :
-        Tuple{DSState, FaultMode}[(DSState(item.position, item.heading), item.mode)
-                                 for item in successor_input]
-    input_counts = isnothing(dirichlet_input) ? simulated_counts(length(successors)) : dirichlet_input
-    state = manual_snapshot(pomdp, DSState(ROBOT_POSITION, HEADING), MODE,
-                            action, successors, input_counts)
-    stored_counts = copy(state.counts.increments)
-    hdr = build_row_hdr(pomdp, state, action, successors;
-        epsilon=EPSILON, n_samples=K, rng=MersenneTwister(SEED))
-    groups = isnothing(groups_input) ? balanced_groups(hdr.distribution.alpha) :
-        validate_groups(deepcopy(groups_input), length(successors))
-    return (; pomdp, state, action, successors, groups, hdr, stored_counts,
-             input_counts=Int.(input_counts))
+function Base.contains(hdr::ParameterHDR, theta::AbstractVector{<:Real})
+    length(theta) == length(hdr.distribution) || return false
+    all(x -> isfinite(x) && 0 <= x <= 1, theta) || return false
+    isapprox(sum(theta),1.0) || return false
+    return pdf(hdr.distribution,theta) >= hdr.tau
+end
+
+Base.in(theta::AbstractVector{<:Real}, hdr::ParameterHDR) = contains(hdr,theta)
+
+function validate_parameters(input)
+    input isa AbstractVector || throw(ArgumentError("DIRICHLET_INPUT must be a vector"))
+    length(input) >= 3 || throw(ArgumentError("at least three Dirichlet parameters are needed"))
+    all(x -> x isa Real && isfinite(x) && x >= 1, input) ||
+        throw(ArgumentError("DIRICHLET_INPUT must contain finite real values >= 1; the current projection does not support values below 1"))
+    return Float64.(input)
+end
+
+function select_groups(parameters, groups_input, grouping)
+    if !isnothing(groups_input)
+        return validate_groups(deepcopy(groups_input),length(parameters)), :manual
+    end
+    grouping in (:density,:balanced) ||
+        throw(ArgumentError("GROUPING must be :density or :balanced"))
+    # No information needs to be discarded when the input already has size 3.
+    length(parameters) == 3 && return [[1],[2],[3]], :direct
+    return grouping == :density ? (density_groups(parameters), :density) :
+                                  (balanced_groups(parameters), :balanced)
+end
+
+function make_experiment(; dirichlet_input=DIRICHLET_INPUT, groups_input=GROUPS,
+                         grouping=GROUPING, n_samples=K, epsilon=EPSILON, seed=SEED)
+    parameters = validate_parameters(dirichlet_input)
+    groups, selected_grouping = select_groups(parameters,groups_input,grouping)
+    # Reuse the original PDF-based Monte Carlo estimator, without creating a
+    # drone environment or putting these parameters into a simulated hyperstate.
+    distribution = DS.hdr_distribution(parameters)
+    tau = estimate_tau(distribution; epsilon, n_samples, rng=MersenneTwister(seed))
+    hdr = ParameterHDR(distribution,Float64(epsilon),Int(n_samples),tau)
+    return (; parameters, groups, hdr, grouping=selected_grouping, seed)
 end
 
 function validation_samples(hdr, groups, seed)
@@ -117,128 +134,133 @@ function validation_samples(hdr, groups, seed)
     inside_full = [contains(hdr, theta) for theta in eachcol(samples)]
     grouped = [group_probabilities(theta, groups) for theta in eachcol(samples)]
     inside_projection = [projected_contains(hdr, groups, q) for q in grouped]
-    return (; samples, grouped, inside_full, inside_projection,
+    densities = [pdf(hdr.distribution, theta) for theta in eachcol(samples)]
+    scores = density_score.(densities, hdr.tau)
+    return (; samples, grouped, inside_full, inside_projection, densities, scores,
         coverage=sum(inside_full) / VALIDATION_SAMPLES,
         projected_coverage=sum(inside_projection) / VALIDATION_SAMPLES)
 end
 
-function run_checks(experiment, samples, curves)
-    e = experiment
-    @testset "Given-step manual Dirichlet HDR" begin
-        # The default nominal example includes every configuration-mode pair.
-        model = DroneSurveillancePOMDP(obstacles=DSPos[])
-        support = neighborhood_successors(model, DSState([3, 3], 0), NOMINAL_MODE)
-        @test length(support) == length(unique(support)) == 140
-        @test Set(config.quad for (config, _) in support) ==
-              Set(DSPos.([(3, 3), (3, 4), (4, 3), (3, 2), (2, 3)]))
-        @test Set(config.heading for (config, _) in support) == Set((0, 90, 180, 270))
-        @test all(count(pair -> pair[2] == mode, support) == 20
-                  for mode in successor_modes(NOMINAL_MODE))
-        phi = simulated_counts(140; n_twos=10, seed=42)
-        @test count(==(1), phi) == 130
-        @test count(==(2), phi) == 10
-        @test phi == simulated_counts(140; n_twos=10, seed=42)
-        @test_throws ArgumentError simulated_counts(140; n_twos=141)
-        @test_throws ArgumentError neighborhood_successors(model, DSState([1, 1], 0), NOMINAL_MODE)
-        @test e.state.config == DSState(ROBOT_POSITION, HEADING)
-        @test e.state.mode == MODE
-        @test e.hdr.distribution.alpha == e.input_counts
-        @test e.state.counts.increments == e.stored_counts
-        for ((config, mode), count) in zip(e.successors, e.input_counts)
-            key = CountKey(e.state.config, e.state.mode, e.action, config, mode)
-            @test count_value(e.state.counts, key) == count
-        end
-        @test sort(vcat(e.groups...)) == collect(eachindex(e.successors))
-        @test all(group -> !isempty(group), e.groups)
-        @test e.hdr.successors == e.successors
-        if all(==(1), e.hdr.distribution.alpha)
+"""Compare projections of exactly the same independent validation samples."""
+function grouping_comparison(e, samples)
+    candidates = length(e.parameters) == 3 ? [(:direct,[[1],[2],[3]])] :
+        [(:balanced,balanced_groups(e.parameters)),(:density,density_groups(e.parameters))]
+    e.grouping == :manual && push!(candidates,(:manual,e.groups))
+    return [let
+        included = [projected_contains(e.hdr, groups, group_probabilities(theta, groups))
+                    for theta in eachcol(samples.samples)]
+        outside = .!samples.inside_full
+        (; strategy, totals=[sum(e.parameters[g]) for g in groups],
+           orange_total=sum(outside), orange_outside=sum(outside .& .!included),
+           projected_coverage=sum(included)/length(included))
+    end for (strategy, groups) in candidates]
+end
+
+function run_checks(e, samples, curves)
+    @testset "Supplied-parameter Dirichlet HDR" begin
+        @test e.hdr.distribution.alpha == e.parameters
+        @test length(e.parameters) >= 3
+        @test size(samples.samples) == (length(e.parameters),VALIDATION_SAMPLES)
+        @test sort(vcat(e.groups...)) == collect(eachindex(e.parameters))
+        @test all(group -> !isempty(group),e.groups)
+        @test all(isfinite,samples.densities)
+        @test all(s -> 0 <= s <= 1,samples.scores)
+        @test (samples.scores .>= 0.5) == samples.inside_full
+        @test e.hdr.tau == estimate_tau(e.parameters; epsilon=e.hdr.epsilon,
+            n_samples=e.hdr.n_samples,rng=MersenneTwister(e.seed))
+        @test samples.samples == rand(MersenneTwister(e.seed+1),e.hdr.distribution,VALIDATION_SAMPLES)
+        if all(==(1),e.parameters)
             @test samples.coverage == 1.0
             @test samples.projected_coverage == 1.0
         else
-            @test abs(samples.coverage - (1 - EPSILON)) < 0.025
+            @test abs(samples.coverage-(1-e.hdr.epsilon)) < 0.025
         end
-        @test e.hdr.tau == estimate_tau(e.input_counts;
-            epsilon=EPSILON, n_samples=K, rng=MersenneTwister(SEED))
-
-        # Manually chosen state/mode/support and counts, without a motion fixture.
-        alternate_model = DroneSurveillancePOMDP(obstacles=DSPos[])
-        alternate_mode = (false, true, false, false, false, false)
-        alternate_config = DSState([3, 3], 90)
-        alternate_support = [(DSState([4, 3], 90), alternate_mode),
-                             (alternate_config, alternate_mode),
-                             (DSState([3, 4], 90), alternate_mode)]
-        alternate = manual_snapshot(alternate_model, alternate_config, alternate_mode,
-                                    1, alternate_support, [5, 3, 2])
-        alternate_hdr = build_row_hdr(alternate_model, alternate, 1, alternate_support;
-                                     epsilon=EPSILON, n_samples=100, rng=MersenneTwister(SEED))
-        @test alternate.config == alternate_config
-        @test alternate.mode == alternate_mode
-        @test alternate_hdr.distribution.alpha == [5, 3, 2]
-        @test length(unique(mode for (_, mode) in alternate_hdr.successors)) == 1
-        @test_throws ArgumentError manual_snapshot(alternate_model, alternate_config,
-            alternate_mode, 1, alternate_support, [5, 3])
-        @test_throws ArgumentError manual_snapshot(alternate_model, alternate_config,
-            alternate_mode, 1, alternate_support, [0, 3, 2])
-        @test_throws ArgumentError manual_snapshot(alternate_model, alternate_config,
-            alternate_mode, 1, alternate_support, [1.5, 3, 2])
-        @test_throws ArgumentError manual_snapshot(alternate_model, alternate_config,
-            alternate_mode, 1, [alternate_support[1], alternate_support[1], alternate_support[2]], [5, 3, 2])
-
         for i in 1:VALIDATION_SAMPLES
-            q = samples.grouped[i]
-            @test isapprox(sum(q), 1)
+            @test isapprox(sum(samples.grouped[i]),1)
             @test !samples.inside_full[i] || samples.inside_projection[i]
         end
-        for i in 1:min(100, VALIDATION_SAMPLES)
-            value = profile_pdf(e.hdr, e.groups, samples.grouped[i])
-            original = pdf(e.hdr.distribution, samples.samples[:, i])
-            @test value >= original || isapprox(value, original; rtol=1e-12)
+        for i in 1:min(100,VALIDATION_SAMPLES)
+            value = profile_pdf(e.hdr,e.groups,samples.grouped[i])
+            original = samples.densities[i]
+            @test value >= original || isapprox(value,original;rtol=1e-12)
         end
-
-        # Independently grid-search the hidden allocation for a five-component case.
-        alpha = [3.0, 5.0, 2.0, 4.0, 6.0]
-        groups = [[1], [2], [3, 4, 5]]
-        q = [0.25, 0.25, 0.5]
-        distribution = DS.Dirichlet(alpha)
-        allocation = maximizing_allocation(alpha, groups, q)
-        analytic = pdf(distribution, allocation)
-        brute_force = maximum(pdf(distribution,
-            [q[1], q[2], 0.5i / 100, 0.5j / 100, 0.5(100 - i - j) / 100])
-            for i in 0:100 for j in 0:100-i)
-        @test group_probabilities(allocation, groups) ≈ q
-        @test analytic >= brute_force || isapprox(analytic, brute_force)
-        @test isapprox(analytic, brute_force; rtol=0.005)
-        @test maximizing_allocation(ones(5), groups, q)[3:5] ≈ fill(1 / 6, 3)
-        @test_throws ArgumentError validate_groups([[1], [2], [2, 3]], 3)
-        @test_throws ArgumentError validate_groups([[1], [2], Int[]], 2)
-        @test_throws ArgumentError maximizing_allocation(alpha, groups, [0.3, 0.3, 0.3])
-        @test_throws ArgumentError maximizing_allocation([0.5, 2, 2], [[1], [2], [3]], q)
-
-        # Check the interior contour against the ORIGINAL PDF threshold.
-        if all(sum(e.hdr.distribution.alpha[i] - 1 for i in group) > 0 for group in e.groups)
+        if length(e.parameters) == 3
+            # Singleton groups preserve full membership, including permutations.
+            @test samples.inside_projection == samples.inside_full
+        end
+        if all(sum(e.parameters[i]-1 for i in group) > 0 for group in e.groups)
             @test !isempty(curves)
             for curve in curves, point in curve
-                @test isapprox(profile_pdf(e.hdr, e.groups, collect(point)),
-                               e.hdr.tau; rtol=0.04)
+                @test isapprox(profile_pdf(e.hdr,e.groups,collect(point)),e.hdr.tau;rtol=0.04)
             end
         end
-        # A separate uniform-input edge-case check, not a second figure or update.
-        uniform = manual_snapshot(e.pomdp, e.state.config, e.state.mode,
-                                  e.action, e.successors, ones(Int, length(e.successors)))
-        uniform_hdr = build_row_hdr(e.pomdp, uniform, e.action, e.successors;
-            epsilon=EPSILON, n_samples=100, rng=MersenneTwister(SEED))
-        @test isempty(uniform.counts.increments)
-        @test isempty(projected_contours(uniform_hdr, e.groups, 20))
-        @test all(projected_contains(uniform_hdr, e.groups, q)
-                  for q in ([1.0,0,0], [0.0,1,0], [0.0,0,1], [1/3,1/3,1/3]))
-        @test e.state.counts.increments == e.stored_counts
+
+        # Fractional parameters remain exact; external input edits cannot alter
+        # the constructed distribution or its stored parameter snapshot.
+        input = [1.5,2.25,3.0,1.0]
+        fractional = make_experiment(dirichlet_input=input,groups_input=nothing,n_samples=100)
+        input[1] = 9.0
+        @test fractional.parameters == [1.5,2.25,3.0,1.0]
+        @test fractional.hdr.distribution.alpha == fractional.parameters
+        @test fractional.hdr.tau == estimate_tau(fractional.parameters;epsilon=EPSILON,
+            n_samples=100,rng=MersenneTwister(SEED))
+        direct = make_experiment(dirichlet_input=[2,3,2],groups_input=nothing,n_samples=100)
+        @test direct.groups == [[1],[2],[3]]
+        @test direct.grouping == :direct
+        @test contains(direct.hdr,[0.25,0.5,0.25])
+        @test !contains(direct.hdr,[0.5,0.5])
+        @test !contains(direct.hdr,[0.5,0.5,0.5])
+        @test !contains(direct.hdr,[-0.1,0.5,0.6])
+        @test !contains(direct.hdr,[NaN,0.5,0.5])
+        @test [0.25,0.5,0.25] in direct.hdr
+        reordered = make_experiment(dirichlet_input=[2,3,2],groups_input=[[2],[1],[3]],n_samples=100)
+        @test reordered.groups == [[2],[1],[3]]
+        @test reordered.grouping == :manual
+        for invalid in (nothing,[2,3],[2,0,2],[2,-1,2],[2,0.5,2],
+                        [2,Inf,2],[2,NaN,2],[2,"three",2])
+            @test_throws ArgumentError make_experiment(dirichlet_input=invalid,groups_input=nothing,n_samples=100)
+        end
+        @test_throws ArgumentError make_experiment(dirichlet_input=[2,3,2],
+            groups_input=[[1],[2],[2,3]],n_samples=100)
+        @test_throws ArgumentError make_experiment(dirichlet_input=[2,3,2],
+            groups_input=nothing,grouping=:unknown,n_samples=100)
+        @test density_groups([2,2,1]) == [[1],[2],[3]]
+        @test density_groups([2,1,1,1]) == [[1],[2,4],[3]]
+        @test density_groups(ones(6)) == balanced_groups(ones(6))
+        @test density_score(0.0,2.0) == 0.0
+        @test density_score(2.0,2.0) == 0.5
+        @test density_score(1e300,1e300) == 0.5
+
+        # Independently check the projection maximizer on a supplied 5D case.
+        alpha = [3.0,5.0,2.0,4.0,6.0]
+        groups = [[1],[2],[3,4,5]]
+        q = [0.25,0.25,0.5]
+        distribution = DS.Dirichlet(alpha)
+        allocation = maximizing_allocation(alpha,groups,q)
+        analytic = pdf(distribution,allocation)
+        brute_force = maximum(pdf(distribution,
+            [q[1],q[2],0.5i/100,0.5j/100,0.5(100-i-j)/100])
+            for i in 0:100 for j in 0:100-i)
+        @test group_probabilities(allocation,groups) ≈ q
+        @test analytic >= brute_force || isapprox(analytic,brute_force)
+        @test isapprox(analytic,brute_force;rtol=0.005)
+        @test maximizing_allocation(ones(5),groups,q)[3:5] ≈ fill(1/6,3)
+        @test_throws ArgumentError validate_groups([[1],[2],[2,3]],3)
+        @test_throws ArgumentError validate_groups([[1],[2],Int[]],2)
+        @test_throws ArgumentError maximizing_allocation(alpha,groups,[0.3,0.3,0.3])
+        @test_throws ArgumentError maximizing_allocation([0.5,2,2],[[1],[2],[3]],q)
+        uniform = make_experiment(dirichlet_input=ones(length(e.parameters)),
+                                  groups_input=e.groups,n_samples=100)
+        @test isempty(projected_contours(uniform.hdr,e.groups,20))
+        @test all(projected_contains(uniform.hdr,e.groups,q)
+                  for q in ([1.0,0,0],[0.0,1,0],[0.0,0,1],[1/3,1/3,1/3]))
     end
 end
 
 # Compose draws the figure; the geometry helper traces M(q)=tau.
 const FIGURE_WIDTH = 1200
 const FIGURE_HEIGHT = 1150
-figure_height(e) = max(FIGURE_HEIGHT, 1090 + 23cld(min(length(e.successors), 10), 2))
+figure_height(e) = max(FIGURE_HEIGHT, 1090 + 23cld(min(length(e.parameters), 10), 2))
 const GREEN = "#cbeecf"
 const INK = "#19392c"
 const ORANGE = "#d46b22"
@@ -254,40 +276,31 @@ dot(x, y; color=INK, radius=2.4, hollow=false) =
     compose(context(), circle(x, y, radius), fill(hollow ? nothing : color),
             stroke(color), linewidth(1.0px))
 
-function add_environment!(elements, e)
-    push!(elements, label(45, 156, "Adaptive drone environment"; size=14))
-    left, top, side = 45.0, 200.0, 300.0
-    nx, ny = e.pomdp.size
-    cellw, cellh = side / nx, side / ny
-    for x in 1:nx, y in 1:ny
-        pos = DSPos(x, y)
-        color = pos in e.pomdp.obstacles ? "#e8a149" :
-            pos == e.pomdp.region_A || pos == e.pomdp.region_B ? "#d9eaca" : "#f4f7f5"
-        x0, y0 = left + (x - 1) * cellw, top + (ny - y) * cellh
-        push!(elements, poly([(x0,y0), (x0+cellw,y0), (x0+cellw,y0+cellh), (x0,y0+cellh)];
-                             color, edge="#acbab2", width=1))
-        if pos == e.pomdp.region_A || pos == e.pomdp.region_B
-            push!(elements, label(x0 + cellw/2, y0 + cellh/2,
-                pos == e.pomdp.region_A ? "A" : "B"; size=15, align=hcenter))
-        end
+function assemble_figure(elements, width, height)
+    # The count-one grouping can shade thousands of small grid triangles.
+    # Compose's variadic interface recurses per child, so attach iteratively.
+    figure = context(units=UnitBox(0,0,width,height))
+    for element in Iterators.reverse(elements)
+        compose!(figure,element)
     end
-    x, y = e.state.config.quad
-    cx, cy = left + (x - 0.5) * cellw, top + (ny - y + 0.5) * cellh
-    push!(elements, dot(cx, cy; color="#1f6276", radius=min(cellw, cellh) * 0.17))
-    dx, dy = DS.HEADING_DIRS[div(e.state.config.heading, 90) + 1]
-    length_arrow = min(cellw, cellh) * 0.34
-    tip = (cx + dx * length_arrow, cy - dy * length_arrow)
-    push!(elements, path([(cx, cy), tip]; color="#153c4b", width=3))
-    push!(elements, dot(tip...; color="#153c4b", radius=3))
-    push!(elements, label(45, 535, "r = ($(x), $(y), $(e.state.config.heading) deg)"; size=12))
-    push!(elements, label(45, 563, "m = " * join(Int.(e.state.mode)); size=12))
-    push!(elements, label(45, 591, "action = $(ACTION)"; size=12))
-    push!(elements, label(45, 630, "GIVEN-STEP SNAPSHOT"; size=11, color="#92501e"))
-    support_labels = isnothing(SUCCESSOR_INPUT) ?
-        ("Current tile + four neighbors.", "Four headings; feasible next modes.") :
-        ("Manually supplied successor support.", "Counts read directly from input.")
-    for (i, text) in enumerate((support_labels..., "No transition or count update."))
-        push!(elements, label(45, 653 + 23(i-1), text; size=10))
+    return figure
+end
+
+function add_parameter_summary!(elements, e)
+    push!(elements,label(45,156,"Supplied Dirichlet parameters";size=14))
+    for i in 1:min(12,length(e.parameters))
+        push!(elements,label(45,200+25(i-1),"phi[$i] = $(e.parameters[i])";size=12))
+    end
+    if length(e.parameters) > 12
+        push!(elements,label(45,506,"More entries in report.txt";size=10))
+    end
+    push!(elements,label(45,535,"Dimension: $(length(e.parameters))";size=12))
+    push!(elements,label(45,563,"Parameter sum: $(sum(e.parameters))";size=12))
+    push!(elements,label(45,605,"USER-SUPPLIED INPUT";size=11,color="#92501e"))
+    for (i,text) in enumerate(("Parameters read directly from the list.",
+                               "No environment or generated counts.",
+                               "Grouping is for visualization only."))
+        push!(elements,label(45,634+23(i-1),text;size=10))
     end
 end
 
@@ -297,9 +310,6 @@ function add_simplex!(elements, hdr, groups, samples, curves, left, title)
     vertices = xy.(((1.0,0.0,0.0), (0.0,1.0,0.0), (0.0,0.0,1.0)))
     center = left + side / 2
     push!(elements, label(center, 156, title; size=15, align=hcenter))
-    count_string = join(Int.(hdr.distribution.alpha[1:min(8, end)]), ", ")
-    length(hdr.distribution.alpha) > 8 && (count_string *= ", ...; see report")
-    push!(elements, label(center, 187, "Full counts: [$(count_string)]"; size=10, align=hcenter))
     push!(elements, poly(collect(vertices); color="#f6faf7", edge="#9eafa3", width=1.2))
     for polygon in projected_fill_polygons(hdr, groups, GRID_RESOLUTION)
         push!(elements, poly(xy.(polygon)))
@@ -340,9 +350,10 @@ function add_simplex!(elements, hdr, groups, samples, curves, left, title)
             end
         end
     end
-    push!(elements, label(left, baseline + 50, "q1 = 1"; size=12, align=hcenter))
-    push!(elements, label(left + side, baseline + 50, "q2 = 1"; size=12, align=hcenter))
-    push!(elements, label(center, vertices[3][2] - 22, "q3 = 1"; size=12, align=hcenter))
+    coordinates = ["<i>q</i><sub>$(i)</sub>" for i in 1:3]
+    push!(elements, label(left, baseline + 50, coordinates[1]; size=12, align=hcenter))
+    push!(elements, label(left + side, baseline + 50, coordinates[2]; size=12, align=hcenter))
+    push!(elements, label(center, vertices[3][2] - 22, coordinates[3]; size=12, align=hcenter))
     push!(elements, label(center, 761, "Original tau = $(round(hdr.tau; sigdigits=5))";
                          size=10, align=hcenter))
     push!(elements, label(center, 787,
@@ -358,85 +369,139 @@ end
 function make_figure(e, samples, curves)
     height = figure_height(e)
     elements = Any[poly([(0,0),(FIGURE_WIDTH,0),(FIGURE_WIDTH,height),(0,height)]; color="white")]
-    push!(elements, label(45, 44, "Given-step Dirichlet input: projected 95% HDR"; size=22))
+    push!(elements, label(45, 44, length(e.parameters) == 3 ? "Given Dirichlet parameters: direct 95% HDR" : "Given Dirichlet parameters: projected 95% HDR"; size=22))
     push!(elements, label(45, 82,
-        "Original $(length(e.successors))-component PDF and threshold | epsilon = $(EPSILON) | K = $(K) | seed = $(SEED)"; size=12))
-    add_environment!(elements, e)
-    add_simplex!(elements, e.hdr, e.groups, samples, curves, 560.0, "Given-step Dirichlet counts")
+        "Original $(length(e.parameters))-component PDF and threshold | epsilon = $(e.hdr.epsilon) | K = $(e.hdr.n_samples) | seed = $(e.seed)"; size=12))
+    add_parameter_summary!(elements, e)
+    add_simplex!(elements, e.hdr, e.groups, samples, curves, 560.0,
+        "Dirichlet($(join(e.parameters, ", ")))")
     push!(elements, label(45, 738,
-        "Counts: $(count(==(1), e.input_counts)) ones, $(count(==(2), e.input_counts)) twos"; size=11))
+        "Parameters: $(count(==(1), e.parameters)) equal to one"; size=11))
     push!(elements, label(45, 764,
-        "Group totals: " * join([sum(e.input_counts[g]) for g in e.groups], ", "); size=11))
+        "Group totals: " * join([sum(e.parameters[g]) for g in e.groups], ", "); size=11))
+    if e.grouping == :density && all(e.parameters[i] > 1 for g in e.groups[1:2] for i in g) &&
+       all(e.parameters[i] == 1 for i in e.groups[3])
+        push!(elements, label(45, 791, "q1, q2: split parameters above one"; size=10))
+        push!(elements, label(45, 815, "q3: parameter-one entries"; size=10))
+    end
 
     push!(elements, poly([(45,881),(65,881),(65,897),(45,897)]; color=GREEN, edge=INK))
-    push!(elements, label(76, 890, "Projected uncertainty region"; size=10))
+    push!(elements, label(76, 890, length(e.parameters) == 3 ? "HDR uncertainty region" : "Projected uncertainty region"; size=10))
     push!(elements, path([(440,890),(471,890)]; width=2.4))
-    push!(elements, label(482, 890, "M(q) = original tau"; size=10))
+    push!(elements, label(482, 890, length(e.parameters) == 3 ? "f(theta; phi) = tau" : "M(q) = original tau"; size=10))
     push!(elements, dot(53,923))
     push!(elements, label(68, 923, "Inside original HDR"; size=10))
     push!(elements, dot(447,923; color=ORANGE, radius=3.8, hollow=true))
     push!(elements, label(462, 923, "Outside original HDR"; size=10))
     push!(elements, label(45, 964,
+        length(e.parameters) == 3 ? "No aggregation: the region and point colors use the same PDF threshold." :
         "Grouping hides allocations: an orange point may lie inside green."; size=11))
     group_text = join(["q$(g) = " * join(indices, "+") for (g,indices) in enumerate(e.groups)], "     |     ")
     length(group_text) > 100 && (group_text = "See report.txt for all group memberships")
-    push!(elements, label(45, 995, "Groups (successor IDs): " * group_text; size=11))
-    push!(elements, label(45, 1025,
-        "First $(min(10, length(e.successors))) of $(length(e.successors)) successors; complete mapping and counts in report.txt"; size=10))
-    for (i, (config, mode)) in enumerate(Iterators.take(e.successors, 10))
-        row, column = divrem(i-1, 2)
-        config_text = config == UNSAFE_CONFIG ? "unsafe terminal" :
-            "r'=($(config.quad[1]),$(config.quad[2]),$(config.heading))"
-        push!(elements, label(45 + 590column, 1055 + 23row,
-            "$(i): $(config_text), m'=$(join(Int.(mode)))"; size=10))
+    push!(elements, label(45, 995, "Groups (parameter indices): " * group_text; size=11))
+    push!(elements,label(45,1025,
+        "Parameter indices and values (all entries in report.txt):";size=10))
+    for i in 1:min(10,length(e.parameters))
+        row,column = divrem(i-1,2)
+        push!(elements,label(45+590column,1055+23row,
+            "phi[$i] = $(e.parameters[i])";size=10))
     end
     # Compose paints earlier children on top; reverse our painter-order list.
-    return compose(context(units=UnitBox(0, 0, FIGURE_WIDTH, height)), reverse(elements)...)
+    return assemble_figure(elements, FIGURE_WIDTH, height)
 end
 
-function write_report(e, samples)
+"""Show original HDR membership without discarding the density information."""
+function make_density_figure(e, samples)
+    width, height = 1100, 650
+    left, right, top, bottom = 90.0, 1040.0, 160.0, 490.0
+    count = min(PLOT_SAMPLES, length(samples.scores))
+    x(i) = left + (right-left)*(i-1)/max(1,count-1)
+    y(score) = bottom - (bottom-top)*score
+    elements = Any[poly([(0,0),(width,0),(width,height),(0,height)]; color="white")]
+    push!(elements, label(45,44,"Original HDR membership: density diagnostic"; size=21))
+    push!(elements, label(45,80,
+        "Same $(count) samples as simplex | original $(length(e.parameters))-component PDF | epsilon = $(EPSILON)"; size=12))
+    push!(elements, label(left,125,"Display score = f(theta; phi) / (f(theta; phi) + tau)"; size=12))
+    push!(elements, poly([(left,top),(right,top),(right,y(0.5)),(left,y(0.5))]; color="#edf7ee"))
+    push!(elements, poly([(left,y(0.5)),(right,y(0.5)),(right,bottom),(left,bottom)]; color="#fff5ec"))
+    for score in (0.0,0.25,0.5,0.75,1.0)
+        push!(elements,path([(left,y(score)),(right,y(score))]; color="#d0d8d3",width=0.7))
+        push!(elements,label(left-12,y(score),string(score); size=10,align=hright))
+    end
+    push!(elements,path([(left,top),(left,bottom),(right,bottom)]; width=1.2))
+    push!(elements,path([(left,y(0.5)),(right,y(0.5))]; width=1.8))
+    for i in 1:count
+        inside = samples.inside_full[i]
+        push!(elements,dot(x(i),y(samples.scores[i]);color=inside ? INK : ORANGE,
+                            radius=inside ? 2.5 : 3.8,hollow=!inside))
+    end
+    for i in unique(round.(Int,range(1,max(1,count);length=4)))
+        push!(elements,label(x(i),bottom+20,string(i);size=10,align=hcenter))
+    end
+    push!(elements,label((left+right)/2,bottom+51,"Sample index (not simplex coordinates)";size=12,align=hcenter))
+    push!(elements,label(45,580,"Cutoff 0.5 corresponds exactly to f(theta; phi) = tau.";size=12))
+    push!(elements,label(45,608,"Green: score >= 0.5. Orange: score below 0.5. The score is not a probability.";size=11))
+    return assemble_figure(elements,width,height)
+end
+
+function write_report(e, samples, comparison)
     open(joinpath(OUTPUT_DIR, "report.txt"), "w") do io
-        println(io, "Given-step manual Dirichlet input: projection of the original full-dimensional 95% HDR")
-        println(io, "Settings: K=$K, epsilon=$EPSILON, seed=$SEED, resolution=$GRID_RESOLUTION")
-        println(io, "Count input: ", isnothing(DIRICHLET_INPUT) ? "simulated phi snapshot; COUNT_SEED=$COUNT_SEED, N_TWOS=$N_TWOS" : "manually supplied phi snapshot")
-        println(io, "Source: r=$(e.state.config), m=$(e.state.mode), action=$ACTION")
-        println(io, "Input counts: $(e.input_counts)")
-        println(io, "Support: ", isnothing(SUCCESSOR_INPUT) ? "current tile + four neighbors, four headings, feasible successor modes" : "explicit manually supplied support")
-        println(io, "No transition, count update, or episode is simulated.")
-        println(io, "Group count totals: $([sum(e.input_counts[g]) for g in e.groups])")
+        println(io, "Supplied-parameter Dirichlet 95% HDR; no environment or generated parameters")
+        println(io, "Settings: K=$(e.hdr.n_samples), epsilon=$(e.hdr.epsilon), seed=$(e.seed), resolution=$GRID_RESOLUTION")
+        println(io, "Dimension: $(length(e.parameters))")
+        println(io, "Input parameters: $(e.parameters)")
+        println(io, length(e.parameters) == 3 ? "Direct three-component visualization; no aggregation." :
+            "Original full-dimensional HDR, projected onto three groups for visualization.")
+        println(io, "Selected grouping strategy: $(e.grouping)")
+        println(io, "Group parameter totals: $([sum(e.parameters[g]) for g in e.groups])")
         println(io, "Groups: $(e.groups)")
-        for (i, (config, mode)) in enumerate(e.successors)
-            println(io, "Successor $i: r'=$config, m'=$mode, count=$(e.input_counts[i])")
+        for (i, value) in enumerate(e.parameters)
+            println(io, "Parameter $i: phi[$i]=$value")
         end
         println(io, "Original tau=$(e.hdr.tau)")
         println(io, "Held-out original coverage=$(samples.coverage), projected coverage=$(samples.projected_coverage)")
+        println(io, "Grouping comparison on the SAME independent samples (not used to choose the grouping):")
+        for c in comparison
+            println(io, "  $(c.strategy): totals=$(c.totals), orange outside projection=$(c.orange_outside)/$(c.orange_total), projected coverage=$(c.projected_coverage)")
+        end
+        if length(e.parameters) > 3
+            println(io, "Complete green/orange separation is not guaranteed by a three-group projection.")
+        end
+        println(io, "hdr_density.png plots the original density score f/(f+tau), with the SAME membership cutoff at 0.5. This display score is not a probability.")
     end
     open(joinpath(OUTPUT_DIR, "samples.csv"), "w") do io
-        println(io, join(vcat(["q1", "q2", "q3", "inside_full_hdr", "inside_projection"],
-                             ["theta_$i" for i in eachindex(e.successors)]), ","))
+        println(io, join(vcat(["q1", "q2", "q3", "inside_full_hdr", "inside_projection", "density", "density_score"],
+                             ["theta_$i" for i in eachindex(e.parameters)]), ","))
         for i in 1:min(PLOT_SAMPLES, VALIDATION_SAMPLES)
             println(io, join(vcat(samples.grouped[i],
-                [samples.inside_full[i], samples.inside_projection[i]], samples.samples[:,i]), ","))
+                [samples.inside_full[i], samples.inside_projection[i], samples.densities[i], samples.scores[i]], samples.samples[:,i]), ","))
         end
     end
 end
 
 function main()
     experiment = make_experiment()
-    samples = validation_samples(experiment.hdr, experiment.groups, SEED + 1)
+    samples = validation_samples(experiment.hdr, experiment.groups, experiment.seed + 1)
     curves = projected_contours(experiment.hdr, experiment.groups, GRID_RESOLUTION)
     run_checks(experiment, samples, curves)
+    comparison = grouping_comparison(experiment, samples)
     mkpath(OUTPUT_DIR)
     figure = make_figure(experiment, samples, curves)
     height = figure_height(experiment)
     draw(SVG(joinpath(OUTPUT_DIR, "hdr_simplex.svg"), FIGURE_WIDTH*px, height*px), figure)
     draw(PNG(joinpath(OUTPUT_DIR, "hdr_simplex.png"), FIGURE_WIDTH*px, height*px; dpi=120), figure)
-    write_report(experiment, samples)
-    println("Manual Dirichlet input: ", experiment.input_counts)
+    density_figure = make_density_figure(experiment,samples)
+    draw(SVG(joinpath(OUTPUT_DIR,"hdr_density.svg"),1100px,650px),density_figure)
+    draw(PNG(joinpath(OUTPUT_DIR,"hdr_density.png"),1100px,650px;dpi=120),density_figure)
+    write_report(experiment, samples, comparison)
+    println("Supplied Dirichlet parameters: ", experiment.parameters)
     println("Groups: ", experiment.groups)
     println("Original held-out HDR coverage: ", samples.coverage)
     println("Projected held-out coverage: ", samples.projected_coverage)
-    println("Saved PNG, SVG, samples.csv, and report.txt to ", OUTPUT_DIR)
+    for c in comparison
+        println("$(c.strategy): orange outside projection = $(c.orange_outside)/$(c.orange_total); group totals = $(c.totals)")
+    end
+    println("Saved simplex and density PNG/SVG, samples.csv, and report.txt to ", OUTPUT_DIR)
     return experiment
 end
 
