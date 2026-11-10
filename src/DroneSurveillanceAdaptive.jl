@@ -8,7 +8,9 @@ using Compose
 using Colors
 using Random
 using Distributions: Dirichlet, pdf
+import Distributions
 using Statistics: quantile
+using LinearAlgebra
 
 export DSPos, DSState, DSObservation, DroneSurveillancePOMDP, ACTIONS_DICT,
        KnownCamera, OBS_CLASSES, observation_labels, visible_cells, random_obstacles,
@@ -24,8 +26,18 @@ export DSPos, DSState, DSObservation, DroneSurveillancePOMDP, ACTIONS_DICT,
        posterior_predictive_row, adaptive_transition, robust_transition,
        adaptive_state, initial_adaptive_state, is_unsafe, is_goal, is_terminal,
        termination_reason, simulate_adaptive,
-       sample_fault_schedule,
-       DirichletHDR, estimate_tau, build_row_hdr, contains
+       sample_fault_schedule, HiddenFaultEnvironment, physical_step,
+       simulate_robust, save_reward_chart,
+       ExactAdaptiveBelief, ExactAdaptiveUpdater, SelectedTransitionRow,
+       BeliefTransitionRows, exact_belief_update, prepare_belief_update!,
+       ZeroObservationEvidence,
+       DirichletHDR, estimate_tau, build_row_hdr, contains,
+       HDRRowMinimum, RowMinimizationError, minimize_hdr_row,
+       RobustPlannerOptions, RobustValueFunction, RobustContinuation,
+       RobustPlanningError, RobustActionBackup, RobustDecision,
+       fit_value_function!, backup_action, robust_decision, prepare_decision!,
+       RobustPolicy, RobustPolicyUpdater, reset_robust_policy!,
+       RecedingHorizonRobustPolicy, RecedingHorizonRobustUpdater, configuration_stratified_particles
 
 const DSPos = SVector{2, Int64}
 const HEADINGS = (0, 90, 180, 270) # north, east, south, west; clockwise degrees
@@ -48,6 +60,7 @@ end
 
 include("adaptive/camera.jl")
 include("adaptive/obstacles.jl")
+include("adaptive/hyperstates.jl")
 
 """
     DroneSurveillancePOMDP(; size=(5, 5), region_A=[1, 1],
@@ -55,16 +68,15 @@ include("adaptive/obstacles.jl")
         obstacles=random_obstacles(size; exclude=[region_A, region_B]),
         camera=KnownCamera(), discount_factor=0.95)
 
-Drone surveillance variant without a ground agent. The drone starts at region A,
-observes noisy classes for the three cells immediately ahead, and earns +1 for
-occupying region B. Its position and heading are not part of the camera output. Movement
-is relative to the heading; rotations change the heading in place. Commands that
-would leave the grid are invalid and excluded from state-dependent action sets.
-Two obstacles are randomly placed by default,
-excluding the start and goal. Moving into an obstacle leaves the state unchanged.
-The field of view is shown in the rendering.
+Adaptive robust drone model with hyperstate (configuration, fault mode, counts).
+The camera reports noisy classes for three cells ahead. Commands are relative to
+heading; all six commands are available at every active pose. Goal entry earns +100, boundary/obstacle collision
+-100, and other active transitions -1. Goal/collision terminate the episode.
+Learned transitions require an explicit selected row; the physical simulator
+executes hidden permanent action faults separately. There is no finite global
+state enumeration because count histories are unbounded.
 """
-@with_kw mutable struct DroneSurveillancePOMDP <: POMDP{DSState, Int64, DSObservation}
+@with_kw mutable struct DroneSurveillancePOMDP <: POMDP{AdaptiveState, Int64, DSObservation}
     size::Tuple{Int64, Int64} = (5, 5)
     region_A::DSPos = [1, 1]
     region_B::DSPos = [size[1], size[2]]
@@ -74,24 +86,19 @@ The field of view is shown in the rendering.
     @assert all(pos -> 1 <= pos[1] <= size[1] && 1 <= pos[2] <= size[2], obstacles) "obstacles must be inside the grid"
     @assert region_A ∉ obstacles && region_B ∉ obstacles "start and goal must be free"
     camera::KnownCamera = KnownCamera()
-    terminal_state::DSState = DSState([-1, -1])
     discount_factor::Float64 = 0.95
 end
 
-include("adaptive/hyperstates.jl")
+include("adaptive/state_construction.jl")
 
-POMDPs.isterminal(pomdp::DroneSurveillancePOMDP, s::DSState) = s == pomdp.terminal_state
+configuration_terminal(pomdp, r::DSState) = r == UNSAFE_CONFIG || r.quad == pomdp.region_B
 POMDPs.isterminal(pomdp::DroneSurveillancePOMDP, s::AdaptiveState) = is_terminal(s)
 POMDPs.discount(pomdp::DroneSurveillancePOMDP) = pomdp.discount_factor
-POMDPs.reward(pomdp::DroneSurveillancePOMDP, s::DSState, a::Int64) =
-    !isterminal(pomdp, s) && s.quad == pomdp.region_B ? 1.0 : 0.0
-
-include("adaptive/states.jl")
 include("adaptive/actions.jl")
 include("adaptive/faults.jl")
 include("adaptive/successors.jl")
 
-# Boundary feasibility depends only on configuration, never on hidden fault flags.
+# Boundary-risk diagnostic only; this never restricts action availability.
 function command_in_bounds(pomdp::DroneSurveillancePOMDP, config::DSState, a::Integer)
     1 <= a <= N_ACTIONS || return false
     x, y = commanded_config(config, a).quad
@@ -101,19 +108,18 @@ end
 """
     actions(pomdp, s::Union{DSState,AdaptiveState})
 
-Return commands whose intended destination is inside the grid. All six action
-IDs remain in `actions(pomdp)` for indexing. An outward command is unavailable
-even if its uncertain outcome could be staying put. Rotations remain available
-at every active cell. Obstacle-directed commands remain available; collision is
-handled by the transition model. No fault mode or count is used in this check.
+Return all six commands at every active configuration. Outward and obstacle-directed
+commands are evaluated through their transition/reward consequences: an executed
+collision enters UNSAFE_CONFIG and earns -100; staying costs -1.
+No pose-dependent action mask or hidden fault mode restricts the action set.
 Terminal states have no available actions.
 """
 function POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::DSState)
-    isterminal(pomdp, s) && return Int64[]
+    configuration_terminal(pomdp, s) && return Int64[]
     x, y = s.quad
     1 <= x <= pomdp.size[1] && 1 <= y <= pomdp.size[2] ||
         throw(ArgumentError("source configuration must be inside the grid"))
-    return Int64[a for a in actions(pomdp) if command_in_bounds(pomdp, s, a)]
+    return collect(actions(pomdp))
 end
 
 function POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::AdaptiveState)
@@ -124,28 +130,9 @@ function POMDPs.actions(pomdp::DroneSurveillancePOMDP, s::AdaptiveState)
     return actions(pomdp, s.config)
 end
 
-"""
-    actions(pomdp, b::DiscreteBelief)
-
-Commands valid for every configuration with positive belief probability.
-This permits boundary-safe selection without revealing the true configuration
-or fault mode. Terminal hypotheses do not restrict commands for active ones;
-an entirely terminal belief has no available actions.
-"""
-function POMDPs.actions(pomdp::DroneSurveillancePOMDP, b::DiscreteBelief)
-    available = collect(actions(pomdp))
-    has_active = false
-    for s in support(b)
-        pdf(b, s) > 0 || continue
-        isterminal(pomdp, s) && continue
-        has_active = true
-        intersect!(available, actions(pomdp, s))
-    end
-    return has_active ? available : Int64[]
-end
-
 include("adaptive/hdr.jl")
 include("adaptive/locomotion.jl")
+include("adaptive/row_minimization.jl")
 include("adaptive/parameter_update.jl")
 include("adaptive/transition.jl")
 include("adaptive/reward.jl")
@@ -156,6 +143,13 @@ function POMDPs.observation(pomdp::DroneSurveillancePOMDP, a::Int64, sp::Adaptiv
     isterminal(pomdp, sp) && return Deterministic(TERMINAL_OBSERVATION)
     return observation(pomdp, a, sp.config)
 end
+
+include("adaptive/belief.jl")
+include("adaptive/planning.jl")
+include("adaptive/mixture_master.jl")
+include("adaptive/robust_backup.jl")
+include("adaptive/particles.jl")
+include("adaptive/robust_policy.jl")
 
 """
     termination_reason(pomdp, s::AdaptiveState, steps, H)
@@ -178,72 +172,14 @@ function termination_reason(pomdp::DroneSurveillancePOMDP, s::AdaptiveState,
     return nothing
 end
 
-"""
-    simulate_adaptive(pomdp, policy, belief_updater, initial_belief;
-                      H, transition_kernel,
-                      initial_state=initial_adaptive_state(pomdp),
-                      rng=Random.default_rng())
-
-Run the augmented drone example until goal, collision, or H completed actions.
-The required callable `transition_kernel(pomdp, s, a)` returns a distribution
-over complete next AdaptiveStates, including the parameter update. For HDR
-constraints, supply a callable that selects theta and calls robust_transition.
-There is no implicit posterior-mean or worst-case row selection.
-
-Only the environment kernel receives the latent hyperstate. The policy receives
-the supplied belief; `update(belief_updater, b, a, o)` receives its camera
-observation, never the sampled true mode or counts. The caller supplies a belief
-that is already initialized. A scripted PlaybackPolicy may use NothingUpdater
-and `initial_belief=nothing`; this does not implement Bayesian belief learning.
-The policy must respect boundary availability; invalid commands raise an error
-before the transition kernel is called.
-
-Every executed transition records (t,s,a,sp,o,r,b,bp) in a POMDPTools.SimHistory.
-The final reward, observation, belief update, and count update are retained.
-Initial terminal states and H=0 execute no actions. Returned fields are history,
-final_state, final_belief, reason, steps, terminated (goal/collision), and
-truncated (horizon). The history contains hidden states for evaluation only.
-"""
-function simulate_adaptive(pomdp::DroneSurveillancePOMDP, policy, belief_updater,
-                           initial_belief; H::Integer, transition_kernel,
-                           initial_state::AdaptiveState=initial_adaptive_state(pomdp),
-                           rng::AbstractRNG=Random.default_rng())
-    s, b = initial_state, initial_belief
-    steps = 0
-    records = NamedTuple[]
-    reason = termination_reason(pomdp, s, steps, H)
-    while reason === nothing
-        a = action(policy, b)
-        a in actions(pomdp, s) ||
-            throw(ArgumentError("policy selected an unavailable action: $a"))
-        a = Int64(a)
-        sp = rand(rng, transition_kernel(pomdp, s, a))
-        r = adaptive_reward(pomdp, s, a, sp)
-        o = rand(rng, observation(pomdp, a, sp))
-        bp = update(belief_updater, b, a, o)
-        steps += 1
-        push!(records, (; t=steps, s, a, sp, o, r, b, bp))
-        s, b = sp, bp
-        reason = termination_reason(pomdp, s, steps, H)
-    end
-    history = POMDPTools.SimHistory(records, discount(pomdp), nothing, nothing)
-    return (; history, final_state=s, final_belief=b, reason, steps,
-            terminated=reason in (:goal, :collision), truncated=reason == :horizon)
-end
-
-function POMDPs.transition(pomdp::DroneSurveillancePOMDP, s::DSState, a::Int64)
-    1 <= a <= N_ACTIONS || throw(ArgumentError("action must be an integer from 1 to $N_ACTIONS"))
-    isterminal(pomdp, s) && return Deterministic(pomdp.terminal_state)
-    command_in_bounds(pomdp, s, a) ||
-        throw(ArgumentError("action would move outside the grid boundary"))
-    attempted = commanded_config(s, a)
-    quad = attempted.quad
-    quad in pomdp.obstacles && return Deterministic(s)
-    return Deterministic(attempted)
-end
+include("adaptive/episode_logging.jl")
+include("adaptive/timing.jl")
+include("adaptive/simulation.jl")
 
 function POMDPTools.render(pomdp::DroneSurveillancePOMDP, step)
     nx, ny = pomdp.size
+    step_number = get(step, :t, nothing)
+    frame_phase = get(step, :phase, nothing)
     s = get(step, :sp, get(step, :s, nothing))
     if s isa AdaptiveState
         # Keep the drone visible at the goal; unsafe states have no grid pose.
@@ -263,12 +199,18 @@ function POMDPTools.render(pomdp::DroneSurveillancePOMDP, step)
     end
     grid = compose(context(), linewidth(0.5mm), stroke("gray"), cells...)
     outline = compose(context(), linewidth(1mm), rectangle(), fill(nothing), stroke("black"))
-    quad = s === nothing || isterminal(pomdp, s) ? nothing :
+    quad = s === nothing || s == UNSAFE_CONFIG ? nothing :
         render_quad(cell_ctx(s.quad, pomdp.size), s.heading)
-    sz = min(w, h)
-    scene = compose(context((w - sz)/2, (h - sz)/2, sz, sz), quad, grid, outline)
+    # Reserve a header above the map so the step counter never obscures a cell.
+    header_height = step_number === nothing ? 0h : 0.08h
+    sz = min(w, h-header_height)
+    scene = compose(context((w - sz)/2, header_height+(h-header_height-sz)/2, sz, sz), quad, grid, outline)
+    label_text = frame_phase == :initial ? "Initial state (no actions)" : "Step $step_number"
+    label = step_number === nothing ? nothing : compose(context(),
+        Compose.text(0.5,0.04,label_text,hcenter,vcenter),
+        fontsize(14pt),font("DejaVu Sans"),fill("black"))
     background = compose(context(), rectangle(), fill("white"), stroke(nothing))
-    return compose(context(), scene, background)
+    return compose(context(), label, scene, background)
 end
 
 function cell_ctx(xy, size)

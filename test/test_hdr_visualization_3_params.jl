@@ -23,7 +23,7 @@ const ACTION = :forward
 const OBSTACLES = ((2, 3), (4, 4))
 # Actual phi values for this illustrative three-outcome transition row.
 # These are supplied counts, not probabilities, increments, or grouped counts.
-const DIRICHLET_INPUT = [2,2,1] #[2, 3, 2]
+const DIRICHLET_INPUT = [3, 3, 2]
 # One destination (r',m') for each input count, in the same order.
 # This reduced test support illustrates the HDR; it is not the full 140-entry row.
 const SUCCESSOR_INPUT = [
@@ -53,15 +53,15 @@ function manual_snapshot(pomdp, config, mode, action, successors, dirichlet_inpu
         throw(ArgumentError("DIRICHLET_INPUT must have one count per SUCCESSOR_INPUT entry"))
     length(dirichlet_input) == 3 ||
         throw(ArgumentError("this direct simplex example requires exactly three successor entries"))
-    all(a -> a isa Real && isfinite(a) && a >= 1 && isinteger(a), dirichlet_input) ||
-        throw(ArgumentError("DIRICHLET_INPUT must contain integer counts >= 1"))
+    all(a -> a isa Real && isfinite(a) && a >= 2 && isinteger(a), dirichlet_input) ||
+        throw(ArgumentError("DIRICHLET_INPUT must contain integer counts >= 2 for model snapshots; use test_hdr_visualization.jl for generic parameters"))
     source = adaptive_state(pomdp, config, mode)
     is_terminal(source) && throw(ArgumentError("choose a nonterminal source configuration"))
     keys = [CountKey(source.config, source.mode, action, rp, mp) for (rp, mp) in successors]
     length(unique(keys)) == length(keys) || throw(ArgumentError("successor entries must be distinct"))
-    # DirichletCounts stores phi-1 internally; this conversion does not simulate
+    # DirichletCounts stores phi-2 internally; this conversion does not simulate
     # observations. count_value(phi,key) is exactly the supplied phi entry.
-    counts = DirichletCounts(Dict(key => Int(a) - 1 for (key, a) in zip(keys, dirichlet_input)))
+    counts = DirichletCounts(Dict(key => Int(a) - 2 for (key, a) in zip(keys, dirichlet_input)))
     return adaptive_state(pomdp, source.config, source.mode, counts)
 end
 
@@ -218,10 +218,13 @@ function run_checks(e, samples, curves)
             e.action,e.successors,[2,0,2])
         @test_throws ArgumentError manual_snapshot(e.pomdp,e.state.config,e.state.mode,
             e.action,e.successors,[2,1.5,2])
-        uniform = make_experiment(dirichlet_input=[1,1,1])
-        @test isempty(hdr_contours(uniform.hdr,20))
-        @test all(contains(uniform.hdr,p) for p in ([1.0,0,0],[0.0,1,0],[0.0,0,1],[1/3,1/3,1/3]))
-        @test length(hdr_fill_polygons(uniform.hdr,[],20)) == 1
+        @test_throws ArgumentError make_experiment(dirichlet_input=[1,1,1])
+        # Test the generic flat-density geometry without putting below-prior
+        # counts in an AdaptiveState.
+        uniform_hdr = DS.DirichletHDR(DS.hdr_distribution(ones(3)), copy(e.successors), EPSILON, 1, 2.0)
+        @test isempty(hdr_contours(uniform_hdr,20))
+        @test all(contains(uniform_hdr,p) for p in ([1.0,0,0],[0.0,1,0],[0.0,0,1],[1/3,1/3,1/3]))
+        @test length(hdr_fill_polygons(uniform_hdr,[],20)) == 1
         @test e.state.counts.increments == e.stored_counts
     end
 end

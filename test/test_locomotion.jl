@@ -25,11 +25,13 @@ end
             @test hdr isa DS.DirichletHDR
             @test length(hdr.successors) == n
             @test hdr.successors == DS.feasible_successors(model, config, mode, action)
-            @test hdr.distribution.alpha == ones(n)
+            @test hdr.distribution.alpha == fill(2, n)
             # The uncertain row is a set: two distinct joint rows are allowed.
             # Neither equals the posterior-mean row, even with all flags set.
-            theta = zeros(n)
-            theta[1], theta[end] = 0.25, 0.75
+            theta = fill(1 / n, n)
+            theta[1] -= 0.01 / n
+            theta[end] += 0.01 / n
+            saved_theta = copy(theta)
             @test theta in hdr
             @test reverse(theta) in hdr
             saved_successors = copy(hdr.successors)
@@ -37,15 +39,15 @@ end
             saved_tau = hdr.tau
             physical = DS.locomotion_mode_transition(model, state, action, theta; hdr)
             @test physical.vals == saved_successors
-            @test physical.probs == theta
-            @test sum(physical.probs) == 1
-            @test DS.pdf(physical, saved_successors[1]) == 0.25
-            @test DS.pdf(physical, saved_successors[end]) == 0.75
+            @test physical.probs ≈ theta
+            @test sum(physical.probs) ≈ 1
+            @test DS.pdf(physical, saved_successors[1]) ≈ theta[1]
+            @test DS.pdf(physical, saved_successors[end]) ≈ theta[end]
             rng = MersenneTwister(41)
             for _ in 1:20
                 pair = rand(rng, physical)
                 @test pair isa Tuple{DS.DSState, DS.FaultMode}
-                @test pair == saved_successors[1] || pair == saved_successors[end]
+                @test pair in saved_successors
             end
             @test state.counts.increments == before
             @test hdr.successors == saved_successors
@@ -54,7 +56,7 @@ end
             # Caller edits cannot change the already constructed kernel.
             theta .= 0
             hdr.successors[1] = saved_successors[end]
-            @test physical.probs[1] == 0.25
+            @test physical.probs[1] ≈ saved_theta[1]
             @test physical.vals == saved_successors
         end
     end
@@ -67,17 +69,17 @@ end
         before = copy(phi.increments)
         hdr = DS.locomotion_mode_uncertainty(model, state, 4; epsilon=0.1,
                                             n_samples=1000, rng=MersenneTwister(42))
-        @test hdr.distribution.alpha == vcat(ones(7), [5], ones(6))
-        theta = zeros(14)
-        theta[8] = 1 # at the highest-density endpoint, not the posterior mean
+        @test hdr.distribution.alpha == vcat(fill(2, 7), [6], fill(2, 6))
+        exponents = hdr.distribution.alpha .- 1
+        theta = exponents ./ sum(exponents) # Dirichlet mode, distinct from its mean
         physical = DS.locomotion_mode_transition(model, state, 4, theta; hdr)
-        @test rand(physical) == (DS.DSState((4, 3), 0), nominal)
-        @test DS.count_value(model, state.counts, key) == 5
+        @test DS.pdf(physical, (DS.DSState((4, 3), 0), nominal)) ≈ 5 / 18
+        @test DS.count_value(model, state.counts, key) == 6
         @test phi.increments == before
         @test DS.pdf(physical, (DS.DSState((2, 3), 0), nominal)) == 0
         @test DS.pdf(physical, state) == 0 # outcomes contain no phi' field
         outside = zeros(14)
-        outside[1] = 1 # zero density since theta[8] is zero
+        outside[1] = 1 # every boundary coordinate has zero density under this prior
         @test_throws ArgumentError DS.locomotion_mode_transition(model, state, 4, outside; hdr)
         @test phi.increments == before
         @test_throws MethodError DS.locomotion_mode_transition(model, state, 4)
@@ -87,8 +89,9 @@ end
     @testset "Coordinate ordering and compatibility with existing composition" begin
         hdr = DS.locomotion_mode_uncertainty(model, s, 4; epsilon=0.1,
                                             n_samples=12, rng=MersenneTwister(43))
-        theta = zeros(14)
-        theta[1], theta[end] = 0.2, 0.8
+        theta = fill(1 / 14, 14)
+        theta[1] -= 0.01 / 14
+        theta[end] += 0.01 / 14
         physical = DS.locomotion_mode_transition(model, s, 4, theta; hdr)
         reversed_hdr = DS.build_row_hdr(model, s, 4, reverse(hdr.successors);
                                        epsilon=0.1, n_samples=12, rng=MersenneTwister(43))
@@ -141,9 +144,12 @@ end
             state = DS.adaptive_state(p, source)
             hdr = DS.locomotion_mode_uncertainty(p, state, 4; epsilon=0.1,
                                                 n_samples=12, rng=MersenneTwister(45))
-            theta = zeros(14)
-            theta[8] = 1
-            @test rand(DS.locomotion_mode_transition(p, state, 4, theta; hdr)) == (target, nominal)
+            theta = fill(1 / 14, 14)
+            physical = DS.locomotion_mode_transition(p, state, 4, theta; hdr)
+            @test DS.pdf(physical, (target, nominal)) ≈ 1 / 14
+            vertex = zeros(14)
+            vertex[8] = 1
+            @test_throws ArgumentError DS.locomotion_mode_transition(p, state, 4, vertex; hdr)
             @test isempty(state.counts.increments)
         end
         for config in (DS.UNSAFE_CONFIG, DS.DSState(model.region_B)),

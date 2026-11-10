@@ -3,18 +3,18 @@
     reward(pomdp, s::AdaptiveState, action, sp::AdaptiveState)
 
 Transition reward for the AR-POMDP: +100 on entry into the goal, -100 for an
-actual obstacle collision, and -1 otherwise (including stay, rotation, and
+actual boundary or obstacle collision, and -1 otherwise (including stay, rotation, and
 ordinary movement). These are alternative rewards, not bonuses added to a
 step cost. An already terminal source has reward 0 on its absorbing transition.
 
-Feasible unsafe entries are obstacle collisions and receive -100. Outward
-boundary commands are invalid and rejected before reward evaluation. Staying
-before an obstacle is not a collision and receives -1.
+Executed boundary crossings and obstacle entries are unsafe collisions and
+receive -100. Staying at the source (including a frozen outward command) is
+not a collision and receives -1. All six actions have defined transitions.
 
 Sources and destinations must be canonical, have consistent outcome labels,
 and form a feasible configuration/mode transition. The numeric reward does
 not use counts, their increment, theta, or the HDR. Counts are never changed.
-The legacy DSState reward remains a separate interface.
+There is no legacy occupancy reward in the AR model.
 """
 function adaptive_reward(pomdp::DroneSurveillancePOMDP, s::AdaptiveState,
                           action::Integer, sp::AdaptiveState)

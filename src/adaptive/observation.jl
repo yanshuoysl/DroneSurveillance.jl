@@ -1,7 +1,7 @@
 # Camera observes one row of three cells ahead of the drone.
 """Return front-left, front-center, front-right grid coordinates, including out-of-grid cells."""
 function visible_cells(pomdp::DroneSurveillancePOMDP, s::DSState)
-    isterminal(pomdp, s) && return ()
+    configuration_terminal(pomdp, s) && return ()
     forward = HEADING_DIRS[div(s.heading, 90) + 1]
     left = DSPos(-forward[2], forward[1])
     center = s.quad + forward
@@ -35,7 +35,7 @@ function POMDPs.obsindex(pomdp::DroneSurveillancePOMDP, o::DSObservation)
 end
 
 function POMDPs.observation(pomdp::DroneSurveillancePOMDP, a::Int64, sp::DSState)
-    isterminal(pomdp, sp) && return Deterministic(TERMINAL_OBSERVATION)
+    configuration_terminal(pomdp, sp) && return Deterministic(TERMINAL_OBSERVATION)
     truth = map(pos -> cell_class(pomdp, pos), visible_cells(pomdp, sp))
     model = pomdp.camera.confusion
     probs = [prod(model[truth[i], o[i]] for i in 1:3) for o in CAMERA_OBSERVATIONS]

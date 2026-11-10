@@ -20,8 +20,12 @@ implementation; it is not the paper's particular floor(K*epsilon) selection.
 
 These alternatives are not implemented in this version. PDF overflow or underflow
 at calibration samples causes an explicit error; there is no log-space fallback.
-All-one counts give a constant density and the whole simplex under the stated
-superlevel-set definition. A single feasible destination gives the singleton (1).
+The model initializes feasible entries at two, storing only increments above
+that baseline. Learned rows therefore have strictly positive exponents phi-1.
+Their positive-threshold HDRs exclude simplex boundaries. Explicitly supplied
+all-one parameters remain supported by the generic HDR helpers: those have
+constant density and the whole simplex under the stated superlevel-set
+definition. A single feasible destination gives the singleton (1).
 
 ## Action-dependent successor support
 
@@ -44,7 +48,7 @@ Goal and unsafe states are absorbing and have no learned count rows.
 
 `is_feasible_successor` returns false for impossible pairs. These pairs are
 structural zeros: exclude them from the Dirichlet row rather than assigning
-them a zero concentration parameter or an implicit prior count of one.
+them a zero concentration parameter or an implicit prior count of two.
 
 Use `CountKey(pomdp, ...)`, `count_value(pomdp, phi, key)`,
 `increment_count(pomdp, phi, key)`, and `count_row(pomdp, phi, r, m, a)` for
@@ -77,13 +81,29 @@ new Monte Carlo samples. Threshold calibration retains approximate coverage.
 Worst-case row selection still belongs in the planner. Goal/unsafe sources use
 the known absorbing pair distribution with theta=[1] and no uncertainty set.
 
+## Linear row minimization
+
+`adaptive/row_minimization.jl` now provides `minimize_hdr_row(hdr,v)` for a fixed
+successor coefficient vector. It implements theta_j(kappa) proportional to
+(phi_j-1)/(v_j+kappa), and brackets/bisects the log-density boundary equation.
+Positive shifted/scaled coordinates avoid crossing the pole. The calibrated
+threshold and count history remain unchanged. Constant values, singleton sets,
+and an HDR equal to its mode have explicit direct solutions; invalid or failed
+solves raise errors. A result is checked against HDR membership and KKT/gap
+criteria before it can be used as a `SelectedTransitionRow`.
+
+This solves the row subproblem for supplied coefficients. It does not build the
+belief value function, select observation-dependent continuation vectors, or
+perform the complete robust backup. Diagnostics are floating-point estimates,
+and the underlying HDR coverage remains Monte Carlo calibrated.
+
 ## Parameter-update transition
 
 The second factor is implemented separately in `adaptive/parameter_update.jl`.
 `parameter_update_transition(pomdp, s, a, rp, mp)` returns a Deterministic
 distribution over `phi + delta^a_{(r,m),(rp,mp)}`. Its PDF equals 1 for exactly
 this full count vector, and 0 for every other one. Only the selected joint
-transition count changes; the sparse representation stores phi-1, so its entry
+transition count changes; the sparse representation stores phi-2, so its entry
 also increases by one. Input counts and sibling histories are preserved.
 
 The interface checks that the conditioning pair is feasible, including map,
@@ -126,31 +146,55 @@ belief updater that can access the true mode or infer a unique observed history.
 
 `adaptive_reward(pomdp, s, a, sp)` (also available as the four-argument
 `POMDPs.reward` method for AdaptiveState) gives +100 on goal entry, -100 on
-obstacle collision, and -1 otherwise. Terminal-source absorbing transitions
+boundary/obstacle collision, and -1 otherwise. Terminal-source absorbing transitions
 give 0, so goal/collision rewards do not repeat. These are total transition
 rewards, with no added step cost on goal or collision entry.
 
 The reward validates canonical states and feasible configuration/mode pairs,
 but its numeric value does not depend on phi, the count update, theta, or the
-HDR. Input histories remain unchanged. Feasible unsafe entries are obstacle
-collisions and receive -100. Outward boundary commands are invalid and have no
-reward transition. Staying before an obstacle is not a collision and costs -1.
+HDR. Input histories remain unchanged. Feasible unsafe entries include boundary
+crossings and obstacle collisions and receive -100. All six actions have rows at
+every active pose. Staying before a boundary or obstacle costs -1.
 
 ## Remaining model integration
 
 HDRs are constructed per row from a hyperstate's own count snapshot. Row-wise
 credibility does not by itself establish simultaneous coverage for the complete
-transition model. Belief updates, worst-case row optimization, and an augmented
-POMDP wrapper for general-purpose POMDPTools simulators remain to be implemented.
+transition model. The exact finite-support updater now conditions on an explicit
+HDR-validated row assignment chosen for the prior belief/action before the real
+observation. It multiplies the selected locomotion probabilities by the known
+camera likelihood and deterministic count-update factor, merges complete
+identical hyperstates, and normalizes in log space. It receives no true hidden
+state. The linear row optimizer and finite-continuation robust planner are
+implemented. The planner keeps the paper's `V_n=max_a min_Theta sum_s b(s)
+[r_Theta + gamma*sum_(t,z) p_Theta V_(n+1)]` layout: expected current rewards
+depend on the same transition row used in the joint transition/observation term.
+KKT row oracles and a primal-dual saddle loop select the worst-case assignment;
+an outer action comparison verifies a selection gap. The finite-mixture master
+accelerates continuation updates without replacing row minimization.
+
+Value layers are finite point-based approximations, keyed by full hyperstate
+support and stage. A rotate-policy lower bound initializes layers; the last
+decision layer considers every valid action. HDR-mode rows explicitly generate
+training beliefs only. Real filtering uses the selected primal rows and remains
+exact enumeration. Finite-collection inner bounds do not certify optimality
+over the complete belief space or coverage of the true transition model.
+
+`RobustPolicy` prepares its selected model before observing and its updater
+advances the separate stage counter only after a successful update. Remaining
+work is connecting hidden physical faults and an augmented POMDP wrapper for
+general-purpose POMDPTools simulators, plus the requested pre-run review.
 
 The dedicated `simulate_adaptive` runner now composes an explicitly supplied
 augmented kernel, transition reward, camera observation, and supplied belief
 updater. It stops at goal, collision, or H executed actions, retaining the final
 count update and reward. `termination_reason` gives physical events precedence
 on action H, while the horizon remains external to phi. The visualization uses
-an explicit HDR-checked reliable-motion row and a scripted route, without
+an explicit reliable-motion physical row and a scripted route, without
 claiming Bayesian belief learning or worst-case optimization. Its history
 contains hidden states for evaluation, not as policy/updater inputs.
+The deterministic demo row is supplied to the explicit physical kernel; it is
+outside the learner's all-two HDR and is not passed through the robust kernel.
 
 The final adaptive robust POMDP must use AdaptiveState = (r,m,phi) as its actual
 state type, with belief updates and planning operating on hidden hyperstates.

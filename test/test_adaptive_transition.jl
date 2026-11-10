@@ -16,16 +16,16 @@ end
         for mode in DS.all_fault_modes(), action in 1:6
             successors = DS.feasible_successors(model, r, mode, action)
             keys = [DS.CountKey(model, r, mode, action, rp, mp) for (rp, mp) in successors]
-            # Distinct concentrations 1:n give a nonuniform, independently
+            # Distinct concentrations 2:n+1 give a nonuniform, independently
             # specified oracle for every joint destination and every row size.
             phi = DS.DirichletCounts(Dict(key => j - 1 for (j, key) in enumerate(keys)))
             before = copy(phi.increments)
             state = DS.adaptive_state(model, r, mode, phi)
             n = length(successors)
-            expected = collect(1:n) ./ sum(1:n)
+            expected = collect(2:n+1) ./ sum(2:n+1)
             row = DS.posterior_predictive_row(model, state, action)
             @test row.successors == successors
-            @test row.counts == collect(1:n)
+            @test row.counts == collect(2:n+1)
             @test row.probabilities ≈ expected
             distribution = DS.adaptive_transition(model, state, action)
             @test length(distribution.vals) == n
@@ -46,7 +46,7 @@ end
         for (mode, n) in ((nominal, 14), ((true, false, false, false, false, false), 12))
             state = DS.adaptive_state(model, r, mode)
             row = DS.posterior_predictive_row(model, state, 4)
-            @test row.counts == ones(Int, n)
+            @test row.counts == fill(2, n)
             @test row.probabilities ≈ fill(1 / n, n)
         end
         # Learning on right/nominal must not change a different action's row.
@@ -55,10 +55,10 @@ end
         learned = DS.adaptive_state(model, r, nominal, phi)
         @test DS.posterior_predictive_row(model, learned, 1).probabilities ≈ fill(1 / 14, 14)
         row = DS.posterior_predictive_row(model, learned, 4)
-        @test row.probabilities[8] ≈ 2 / 15
-        @test row.probabilities[1] ≈ 1 / 15
+        @test row.probabilities[8] ≈ 3 / 29
+        @test row.probabilities[1] ≈ 2 / 29
         # Large valid entries must not overflow an Int row sum.
-        large = DS.DirichletCounts(Dict(DS.CountKey(model, r, nominal, 4, rp, mp) => typemax(Int) - 1
+        large = DS.DirichletCounts(Dict(DS.CountKey(model, r, nominal, 4, rp, mp) => typemax(Int) - 2
                                        for (rp, mp) in row.successors))
         @test DS.posterior_predictive_row(model, DS.adaptive_state(model, r, nominal, large), 4).
               probabilities ≈ fill(1 / 14, 14)
@@ -117,20 +117,19 @@ end
     end
 
     @testset "HDR-constrained candidate kernels" begin
-        # Uniform prior gives the full simplex, so vertices are admissible.
+        # The symmetric all-two prior has an interior mode and excludes vertices.
         hdr = DS.build_row_hdr(model, s, 4; epsilon=0.1, n_samples=20, rng=MersenneTwister(1))
-        theta = zeros(14)
-        theta[8] = 1
+        theta = fill(1 / 14, 14)
         robust = DS.robust_transition(model, s, 4, theta; hdr)
         chosen = rand(MersenneTwister(2), robust)
-        @test chosen.config == DS.DSState((4, 3), 0)
-        @test chosen.mode == nominal
-        @test DS.pdf(robust, chosen) == 1
+        @test (chosen.config, chosen.mode) in hdr.successors
+        @test DS.pdf(robust, chosen) ≈ 1 / 14
         @test length(chosen.counts.increments) == 1
         # HDR ordering is respected, not silently interpreted in default order.
         reordered = DS.build_row_hdr(model, s, 4, reverse(hdr.successors);
                                     epsilon=0.1, n_samples=20, rng=MersenneTwister(1))
-        @test rand(MersenneTwister(2), DS.robust_transition(model, s, 4, reverse(theta); hdr=reordered)) == chosen
+        reordered_kernel = DS.robust_transition(model, s, 4, reverse(theta); hdr=reordered)
+        @test all(DS.pdf(reordered_kernel, sp) ≈ DS.pdf(robust, sp) for sp in robust.vals)
         @test_throws ArgumentError DS.robust_transition(model, s, 1, theta; hdr)
         incomplete = DS.build_row_hdr(model, s, 4, hdr.successors[1:2]; epsilon=0.1, n_samples=20)
         @test_throws ArgumentError DS.robust_transition(model, s, 4, [0.5, 0.5]; hdr=incomplete)
@@ -141,15 +140,19 @@ end
         updated_hdr = DS.build_row_hdr(model, learned, 4; epsilon=0.1, n_samples=1000,
                                       rng=MersenneTwister(3))
         outside = zeros(14)
-        outside[8] = 1 # density zero under Dir(2,1,...,1)
+        outside[8] = 1 # density zero under the all-two baseline and learned rows
+        @test !(outside in hdr)
+        @test_throws ArgumentError DS.robust_transition(model, s, 4, outside; hdr)
         @test !(outside in updated_hdr)
         @test_throws ArgumentError DS.robust_transition(model, learned, 4, outside; hdr=updated_hdr)
-        inside = zeros(14)
-        inside[1] = 1 # maximum density, and this kernel increments the stay count
-        stay = rand(DS.robust_transition(model, learned, 4, inside; hdr=updated_hdr))
+        exponents = updated_hdr.distribution.alpha .- 1
+        inside = exponents ./ sum(exponents)
+        updated_kernel = DS.robust_transition(model, learned, 4, inside; hdr=updated_hdr)
+        stay = only(filter(sp -> sp.config == r && sp.mode == nominal, updated_kernel.vals))
         @test stay.config == r
-        @test DS.count_value(model, stay.counts, key) == 3
-        @test DS.count_value(model, learned.counts, key) == 2
+        @test DS.pdf(updated_kernel, stay) ≈ 2 / 15
+        @test DS.count_value(model, stay.counts, key) == 4
+        @test DS.count_value(model, learned.counts, key) == 3
         @test_throws ArgumentError DS.robust_transition(model, learned, 4, ones(14); hdr=updated_hdr)
         terminal = DS.adaptive_state(model, DS.UNSAFE_CONFIG)
         @test_throws ArgumentError DS.robust_transition(model, terminal, 4, theta; hdr)

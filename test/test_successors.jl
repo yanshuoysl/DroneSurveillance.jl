@@ -31,6 +31,7 @@ end
                 expected = [(rp, mp) for rp in (r, commanded[action]) for mp in admissible_modes]
                 actual = DS.feasible_successors(model, r, mode, action)
                 @test actual == expected
+                @test DS.count_row(model, DS.DirichletCounts(), r, mode, action) == fill(2, length(actual))
                 @test length(unique(actual)) == 2 * (7 - count(identity, mode))
                 @test all(count(pair -> pair[2] == mp, actual) == 2 for mp in admissible_modes)
                 @test all(DS.is_feasible_successor(model, r, mode, action, rp, mp)
@@ -62,26 +63,26 @@ end
         phi = DS.DirichletCounts()
         key = DS.CountKey(model, r, nominal, 4, right, nominal)
         updated = DS.increment_count(model, phi, key)
-        @test DS.count_value(model, phi, key) == 1
-        @test DS.count_value(model, updated, key) == 2
+        @test DS.count_value(model, phi, key) == 2
+        @test DS.count_value(model, updated, key) == 3
         @test isempty(phi.increments)
-        @test DS.count_row(model, updated, r, nominal, 4) == vcat(ones(Int, 7), [2], ones(Int, 6))
-        @test DS.count_row(model, updated, r, nominal, 1) == ones(Int, 14)
+        @test DS.count_row(model, updated, r, nominal, 4) == vcat(fill(2, 7), [3], fill(2, 6))
+        @test DS.count_row(model, updated, r, nominal, 1) == fill(2, 14)
         support = DS.feasible_successors(model, r, nominal, 4)
         @test DS.count_row(model, updated, r, nominal, 4, reverse(support)) ==
-              vcat(ones(Int, 6), [2], ones(Int, 7))
+              vcat(fill(2, 6), [3], fill(2, 7))
         @test_throws ArgumentError DS.count_row(model, phi, r, nominal, 4, support[1:2])
         @test_throws ArgumentError DS.count_row(model, phi, r, nominal, 4,
                                                vcat(support[1:end-1], support[1:1]))
         # Updating one cross-combination must not update other modes or cells.
         stay_key = DS.CountKey(model, r, nominal, 4, r, nominal)
         flagged_key = DS.CountKey(model, r, nominal, 4, right, failed_right)
-        @test DS.count_value(model, updated, stay_key) == 1
-        @test DS.count_value(model, updated, flagged_key) == 1
+        @test DS.count_value(model, updated, stay_key) == 2
+        @test DS.count_value(model, updated, flagged_key) == 2
         cross_updated = DS.increment_count(model, updated, flagged_key)
-        @test DS.count_value(model, cross_updated, key) == 2
-        @test DS.count_value(model, cross_updated, flagged_key) == 2
-        @test DS.count_value(model, cross_updated, stay_key) == 1
+        @test DS.count_value(model, cross_updated, key) == 3
+        @test DS.count_value(model, cross_updated, flagged_key) == 3
+        @test DS.count_value(model, cross_updated, stay_key) == 2
         # Even an unchecked storage key cannot enter the map-aware count APIs.
         for wrong in (DS.DSState((2, 3), 0), DS.DSState((3, 4), 0),
                       DS.DSState((3, 2), 0), DS.DSState((4, 3), 90),
@@ -111,16 +112,16 @@ end
             @test DS.is_feasible_successor(blocked, r, nominal, action, r, nominal)
             @test length(DS.feasible_successors(blocked, r, nominal, action)) == 14
             key = DS.CountKey(blocked, r, nominal, action, DS.UNSAFE_CONFIG, nominal)
-            @test DS.count_value(blocked, DS.increment_count(blocked, DS.DirichletCounts(), key), key) == 2
+            @test DS.count_value(blocked, DS.increment_count(blocked, DS.DirichletCounts(), key), key) == 3
         end
         for (action, position) in enumerate(((3, 5), (3, 1), (1, 3), (5, 3)))
             source = DS.DSState(position, 0)
             failed = ntuple(i -> i == action, 6)
-            @test !DS.is_feasible_successor(model, source, nominal, action, DS.UNSAFE_CONFIG, nominal)
-            @test !DS.is_feasible_successor(model, source, nominal, action, source, failed)
-            @test !DS.is_feasible_successor(model, source, nominal, action, DS.UNSAFE_CONFIG, failed)
-            @test !DS.is_feasible_successor(model, source, nominal, action, source, nominal)
-            @test_throws ArgumentError DS.feasible_successors(model, source, nominal, action)
+            @test DS.is_feasible_successor(model, source, nominal, action, DS.UNSAFE_CONFIG, nominal)
+            @test DS.is_feasible_successor(model, source, nominal, action, source, failed)
+            @test DS.is_feasible_successor(model, source, nominal, action, DS.UNSAFE_CONFIG, failed)
+            @test DS.is_feasible_successor(model, source, nominal, action, source, nominal)
+            @test length(DS.feasible_successors(model, source, nominal, action)) == 14
         end
         source = DS.DSState((4, 5), 0)
         goal = DS.DSState(model.region_B, 0)
@@ -155,14 +156,16 @@ end
             hdr = DS.build_row_hdr(model, state, action; epsilon=0.1, n_samples=100,
                                    rng=MersenneTwister(action))
             @test hdr.successors == support
-            @test hdr.distribution.alpha == vcat([2], ones(Int, 13))
+            @test hdr.distribution.alpha == vcat([3], fill(2, 13))
         end
         all_failed = last(modes)
         state = DS.adaptive_state(model, r, all_failed)
         hdr = DS.build_row_hdr(model, state, 4; epsilon=0.1, n_samples=1)
         @test hdr.successors == [(r, all_failed), (DS.DSState((4, 3), 0), all_failed)]
-        @test hdr.distribution.alpha == [1, 1]
-        @test hdr.tau == 1.0
+        @test hdr.distribution.alpha == [2, 2]
+        @test 0 < hdr.tau <= 1.5
+        @test !([0.0, 1.0] in hdr)
+        @test !([1.0, 0.0] in hdr)
         @test [0.5, 0.5] in hdr
         for terminal in (DS.adaptive_state(model, DS.UNSAFE_CONFIG),
                          DS.adaptive_state(model, DS.DSState(model.region_B)))

@@ -1,3 +1,10 @@
 Manifest.toml
 .vscode
 /test/output/hdr/
+
+/adaptive_runs/
+/test/output/episode.jsonl
+/test/output/rewards.csv
+/test/output/rewards.svg
+/test/output/drone.gif
+/test/output/run_seed*/

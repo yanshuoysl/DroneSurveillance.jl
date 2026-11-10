@@ -52,3 +52,90 @@ end
         end
     end
 end
+
+if !isdefined(@__MODULE__, :run_adaptive_example)
+    include(joinpath(@__DIR__,"..","examples","run_adaptive.jl"))
+end
+
+@testset "Optional fixed fault time in example runs" begin
+    DS = DroneSurveillanceAdaptive
+    defaults = adaptive_example_settings(["42","30"])
+    @test defaults.fault_time_step === nothing
+    for option in (["--fault_time_step","4"],["--fault_time_step=4"])
+        settings = adaptive_example_settings(vcat(["42","30"],option))
+        @test settings.fault_time_step == 4
+        @test settings.H == 30 && settings.output_root == defaults.output_root
+    end
+    @test adaptive_example_settings(["--fault_time_step","1","42","1"]).fault_time_step == 1
+    @test adaptive_example_settings(["42","30","--fault_time_step","30"]).fault_time_step == 30
+    for option in (["--fault_time_step"],["--fault_time_step="],["--fault_time_step","oops"],
+                   ["--fault_time_step","1.5"],["--fault_time_step","0"],
+                   ["--fault_time_step","-1"],["--fault_time_step","31"],
+                   ["--fault_time_step","4","--fault_time_step=5"])
+        @test_throws ArgumentError adaptive_example_settings(vcat(["42","30"],option))
+    end
+    @test_throws ArgumentError adaptive_example_settings(["42","0","--fault_time_step","1"])
+    @test_throws ArgumentError adaptive_example_settings(["42","30","/tmp/fixed_fault","0","--fault_time_step","4"])
+    mktempdir() do dir
+        args = ["42","4",dir,"2","--lookahead","1","--particles","128"]
+        fixed_args = vcat(args,["--fault_time_step","4"])
+        fixed = run_adaptive_example(fixed_args;io=nothing,generate_gif=false)
+        @test fixed.fault_time_step == 4 && fixed.fault_steps == (4,)
+        @test fixed.steps == 4
+        @test all(r.fault_event === nothing for r in fixed.history[1:3])
+        event = fixed.history[4].fault_event
+        @test event.step == 4 && event.action in 1:6
+        @test count(identity,fixed.final_state.mode) == 1
+        @test fixed.final_state.mode[event.action]
+        @test occursin("fault_time_step=4",read(fixed.console_log_path,String))
+        @test occursin("\"fault_steps\":[4]",read(fixed.log_path,String))
+        warmed = run_adaptive_example(vcat(fixed_args,"warmup=true");io=nothing,generate_gif=false)
+        @test warmed.timing.warmup_completed && warmed.timing.warmup.steps == 4
+        @test [r.fault_event for r in warmed.history] == [r.fault_event for r in fixed.history]
+        @test [r.a for r in warmed.history] == [r.a for r in fixed.history]
+        @test [r.o for r in warmed.history] == [r.o for r in fixed.history]
+        @test warmed.final_belief._logprobs == fixed.final_belief._logprobs
+        random = run_adaptive_example(args;io=nothing,generate_gif=false)
+        schedule_rng = MersenneTwister(rand(MersenneTwister(42),UInt))
+        @test random.fault_time_step === nothing
+        @test random.fault_steps == Tuple(DS.sample_fault_schedule(4,2;rng=schedule_rng))
+    end
+end
+
+@testset "Explicit fault type in example runs" begin
+    DS = DroneSurveillanceAdaptive
+    @test adaptive_example_settings(["42","30"]).fault_type === nothing
+    for action in 1:6, option in (["--fault_type",string(action)],["--fault_type=$action"])
+        settings = adaptive_example_settings(vcat(["42","30","--fault_time_step","4"],option))
+        @test settings.fault_type == action && settings.fault_time_step == 4
+    end
+    @test adaptive_example_settings(["--fault_type","1","42","30","--fault_time_step","4"]).fault_type == 1
+    for option in (["--fault_type"],["--fault_type="],["--fault_type","oops"],
+                   ["--fault_type","1.5"],["--fault_type","0"],["--fault_type","7"],
+                   ["--fault_type","-1"],["--fault_type","1","--fault_type=2"])
+        @test_throws ArgumentError adaptive_example_settings(vcat(["42","30","--fault_time_step","4"],option))
+    end
+    @test_throws ArgumentError adaptive_example_settings(["42","30","--fault_type","1"])
+    mktempdir() do dir
+        args = ["42","6",dir,"2","--lookahead","1","--particles","128",
+            "--fault_time_step","4","--fault_type","1"]
+        result = run_adaptive_example(args;io=nothing,generate_gif=false)
+        @test result.fault_type == 1 && result.fault_time_step == 4 && result.fault_steps == (4,)
+        @test result.steps == 6
+        @test all(r.fault_event === nothing && !r.sp.mode[1] for r in result.history[1:3])
+        fourth = result.history[4]
+        @test fourth.fault_event == (;step=4,action=1)
+        @test fourth.a == 1 && fourth.sp.config == fourth.s.config
+        @test !fourth.s.mode[1] && fourth.sp.mode[1]
+        @test all(r.s.mode[1] && r.sp.mode[1] && r.fault_event === nothing for r in result.history[5:6])
+        @test count(identity,result.final_state.mode) == 1
+        @test occursin("fault_type=1",read(result.console_log_path,String))
+        @test occursin("\"fault_actions\":[1]",read(result.log_path,String))
+        warmed = run_adaptive_example(vcat(args,"warmup=true");io=nothing,generate_gif=false)
+        @test warmed.timing.warmup_completed && warmed.timing.warmup.steps == 6
+        @test [r.fault_event for r in warmed.history] == [r.fault_event for r in result.history]
+        @test [r.a for r in warmed.history] == [r.a for r in result.history]
+        @test [r.o for r in warmed.history] == [r.o for r in result.history]
+        @test warmed.final_belief._logprobs == result.final_belief._logprobs
+    end
+end

@@ -9,7 +9,7 @@ Successors follow the full Cartesian support S(r,m,a); probabilities are
 `counts / sum(counts)`, the Dirichlet posterior predictive row. Each joint
 configuration/mode pair has its own parameter; no factorization is imposed.
 
-Only this (r,m,a) row of `s.counts` is read, with an implicit prior count of one
+Only this (r,m,a) row of `s.counts` is read, with an implicit prior count of two
 per feasible pair. Terminal states have no learned row and raise ArgumentError.
 This function does not increment counts or sample a latent transition model.
 It is a Bayesian baseline, not the AR-POMDP's uncertain locomotion/mode row.
@@ -56,7 +56,7 @@ Goal/unsafe sources are absorbing and keep their mode and counts. An explicit
 row for such a source must be `[1]`. Invalid source labels or actions are rejected.
 These kernels condition on a hidden-state hypothesis; they do not expose the
 true mode to the robot or perform the robot's observation-based belief update.
-The existing DSState POMDP interface is separate from these augmented kernels.
+POMDPs.transition has no implicit model; use these explicit kernel interfaces.
 """
 function adaptive_transition(pomdp::DroneSurveillancePOMDP, s::AdaptiveState,
                              action::Integer)

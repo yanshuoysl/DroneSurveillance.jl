@@ -25,12 +25,12 @@ end
     unsafe = DS.adaptive_state(model, DS.UNSAFE_CONFIG)
 
     function commanded_kernel(p, s, a)
-        hdr = DS.locomotion_mode_uncertainty(p, s, a; epsilon=0.1,
-                                            n_samples=12, rng=MersenneTwister(7))
-        theta = zeros(length(hdr.successors))
-        j = findfirst(pair -> pair[1] != s.config && pair[2] == s.mode, hdr.successors)
+        # Fixed physical fixture for termination, not a row from the learner's HDR.
+        successors = DS.feasible_successors(p, s.config, s.mode, a)
+        theta = zeros(length(successors))
+        j = findfirst(pair -> pair[1] != s.config && pair[2] == s.mode, successors)
         theta[j] = 1
-        return DS.robust_transition(p, s, a, theta; hdr=hdr)
+        return DS.adaptive_transition(p, s, a, theta)
     end
 
     function stay_kernel(p, s, a)
@@ -158,16 +158,20 @@ end
                     H=-1, transition_kernel=never)
     end
 
-    @testset "Boundary-invalid actions are rejected before the kernel" begin
+    @testset "Outward actions execute their kernel and terminate on collision" begin
         policy = PlaybackPolicy([4])
         edge = DS.adaptive_state(model, DS.DSState((5, 3)))
         up = TerminationTestUpdater(NamedTuple[])
         kernel_calls = Ref(0)
-        kernel = (args...) -> (kernel_calls[] += 1; error("Outward kernel invoked"))
-        @test_throws ArgumentError DS.simulate_adaptive(model, policy, up, nothing;
+        kernel = (p,s,a) -> begin
+            kernel_calls[] += 1
+            commanded_kernel(p,s,a)
+        end
+        result = DS.simulate_adaptive(model, policy, up, nothing;
                     H=1, initial_state=edge, transition_kernel=kernel)
-        @test kernel_calls[] == 0
-        @test isempty(up.calls)
+        @test result.reason == :collision && result.total_reward == -100
+        @test result.steps == kernel_calls[] == 1
+        @test length(up.calls) == 1
         @test isempty(edge.counts.increments)
     end
 

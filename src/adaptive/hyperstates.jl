@@ -1,6 +1,5 @@
 # Augmented state s = (r, m, φ), with robot configuration r = (x, y, ψ).
-# Include inside DroneSurveillanceAdaptive after DSState and the model are defined.
-# This file does not replace the existing model's state type or transition methods.
+# Model-independent hyperstate types; loaded after DSState, before the POMDP type.
 
 """
 Six fault flags, ordered forward, backward, left, right, clockwise rotation,
@@ -49,7 +48,7 @@ end
 
 @enum AdaptiveOutcome ACTIVE_STATE GOAL_STATE UNSAFE_STATE
 
-# Obstacle entries use this unsafe configuration. Outward commands are invalid.
+# Executed boundary crossings and obstacle entries share this unsafe configuration.
 # Goal configurations keep their actual grid position and heading.
 const UNSAFE_CONFIG = DSState((-1, -1), 0)
 
@@ -85,13 +84,16 @@ struct CountKey
     end
 end
 
+const DIRICHLET_PRIOR_COUNT = 2
+
 """
     DirichletCounts()
 
-Sparse representation of the full Dirichlet count vector φ, initially all ones
-on feasible transition entries. `increments[key]` stores φ[key] - 1; missing
-entries have count 1. Impossible entries are excluded by transition support,
-not assigned count 1 merely because they are absent from this dictionary.
+Sparse representation of the full Dirichlet count vector φ, initially all twos
+on feasible transition entries. `increments[key]` stores φ[key] - 2; missing
+entries have count 2. Thus every learned-row exponent φ[key] - 1 stays positive.
+Impossible entries are excluded by transition support, not assigned count 2
+merely because they are absent from this dictionary.
 
 Treat `increments` as read-only. Use `increment_count` to obtain a new snapshot;
 each belief history can then retain its own counts. The constructor copies its
@@ -109,16 +111,16 @@ end
 
 DirichletCounts() = DirichletCounts(Dict{CountKey, Int}())
 
-"""Read a storage entry (implicit prior 1); use `count_value(pomdp, phi, key)` to validate feasibility."""
+"""Read a storage entry (implicit prior 2); use `count_value(pomdp, phi, key)` to validate feasibility."""
 count_value(phi::DirichletCounts, key::CountKey) =
-    Base.Checked.checked_add(1, get(phi.increments, key, 0))
+    Base.Checked.checked_add(DIRICHLET_PRIOR_COUNT, get(phi.increments, key, 0))
 
 """Increment a storage key without mutation; use `increment_count(pomdp, phi, key)` to validate support."""
 function increment_count(phi::DirichletCounts, key::CountKey)
     updated = DirichletCounts(phi.increments)
     increment = Base.Checked.checked_add(get(updated.increments, key, 0), 1)
-    # Leave room for the implicit prior count of 1.
-    Base.Checked.checked_add(increment, 1)
+    # Leave room for the implicit prior count of 2.
+    Base.Checked.checked_add(increment, DIRICHLET_PRIOR_COUNT)
     updated.increments[key] = increment
     return updated
 end
@@ -183,34 +185,6 @@ end
 is_unsafe(s::AdaptiveState) = s.outcome == UNSAFE_STATE
 is_goal(s::AdaptiveState) = s.outcome == GOAL_STATE
 is_terminal(s::AdaptiveState) = s.outcome != ACTIVE_STATE
-
-"""
-    adaptive_state(pomdp, config, mode=NOMINAL_MODE, counts=DirichletCounts())
-
-Construct a map-aware augmented state. Obstacle cells are unsafe; region B is a
-successful terminal configuration. Outside coordinates are defensively
-canonicalized to unsafe, but outward commands are invalid in the transition
-model. This classifies an outcome only; it does not implement movement, fault
-dynamics, or count updates.
-"""
-function adaptive_state(pomdp::DroneSurveillancePOMDP, config::DSState,
-                        mode::FaultMode=NOMINAL_MODE,
-                        counts::DirichletCounts=DirichletCounts())
-    x, y = config.quad
-    if !(1 <= x <= pomdp.size[1] && 1 <= y <= pomdp.size[2]) ||
-       config.quad in pomdp.obstacles
-        return AdaptiveState(UNSAFE_CONFIG, mode, counts; outcome=UNSAFE_STATE)
-    end
-    outcome = config.quad == pomdp.region_B ? GOAL_STATE : ACTIVE_STATE
-    return AdaptiveState(config, mode, counts; outcome=outcome)
-end
-
-"""Known initial state: region A, configured initial heading, nominal mode, all-one counts."""
-function initial_adaptive_state(pomdp::DroneSurveillancePOMDP)
-    s = adaptive_state(pomdp, DSState(pomdp.region_A, pomdp.initial_heading))
-    is_unsafe(s) && throw(ArgumentError("initial position must be a free grid cell"))
-    return s
-end
 
 Base.:(==)(a::AdaptiveState, b::AdaptiveState) =
     a.config == b.config && a.mode == b.mode && a.counts == b.counts && a.outcome == b.outcome

@@ -35,8 +35,8 @@ end
                 @test updated.increments !== phi.increments
                 @test DS.pdf(conditional, DS.DirichletCounts(expected)) == 1.0
                 @test DS.pdf(conditional, phi) == 0.0
-                @test DS.count_value(model, updated, keys[j]) == j + 1
-                @test DS.count_value(model, updated, other_key) == 8
+                @test DS.count_value(model, updated, keys[j]) == j + 2
+                @test DS.count_value(model, updated, other_key) == 9
                 # A different delta or a double increment has probability zero.
                 wrong = copy(before)
                 alternative = mod1(j + 1, length(keys))
@@ -64,7 +64,7 @@ end
         stayed = rand(DS.parameter_update_transition(model, state, 4, r, nominal))
         @test moved.increments == Dict(move_key => 1)
         @test stayed.increments == Dict(stay_key => 1)
-        @test DS.count_row(model, moved, r, nominal, 1) == ones(Int, 14)
+        @test DS.count_row(model, moved, r, nominal, 1) == fill(2, 14)
         moved.increments[move_key] = 99
         @test stayed.increments == Dict(stay_key => 1)
         @test isempty(state.counts.increments)
@@ -75,8 +75,7 @@ end
             state = DS.adaptive_state(model, r, mode)
             hdr = DS.locomotion_mode_uncertainty(model, state, action; epsilon=0.1,
                                                 n_samples=12, rng=MersenneTwister(action))
-            theta = zeros(length(hdr.successors))
-            theta[1], theta[end] = 0.25, 0.75
+            theta = fill(1 / length(hdr.successors), length(hdr.successors))
             physical = DS.locomotion_mode_transition(model, state, action, theta; hdr)
             combined = DS.robust_transition(model, state, action, theta; hdr)
             @test sum(combined.probs) == 1.0
@@ -143,10 +142,11 @@ end
         @test_throws ArgumentError DS.parameter_update_transition(model, DS.DSState((100, 100)), nominal,
                                                                  state.counts, 4, right, nominal)
         key = DS.CountKey(model, r, nominal, 4, right, nominal)
-        maximum = DS.DirichletCounts(Dict(key => typemax(Int) - 1))
+        maximum = DS.DirichletCounts(Dict(key => typemax(Int) - 2))
+        @test DS.count_value(model, maximum, key) == typemax(Int)
         large_state = DS.adaptive_state(model, r, nominal, maximum)
         @test_throws OverflowError DS.parameter_update_transition(model, large_state, 4, right, nominal)
-        @test maximum.increments[key] == typemax(Int) - 1
+        @test maximum.increments[key] == typemax(Int) - 2
         @test isempty(state.counts.increments)
     end
 end

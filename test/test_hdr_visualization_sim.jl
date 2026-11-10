@@ -10,9 +10,9 @@ const K = 10_000
 const EPSILON = 0.05
 const SEED = 42
 const COUNT_SEED = 42
-# Simulate phi for this given-step example: randomly choose N_TWOS entries
-# to have count 2; all other entries have count 1. No transitions are simulated.
-const N_TWOS = 10
+# Simulate phi for this given-step example: randomly choose N_THREES entries
+# to have count 3; all other entries have the prior count 2. No transitions run.
+const N_THREES = 10
 const GRID_RESOLUTION = 160
 const VALIDATION_SAMPLES = 10_000
 const PLOT_SAMPLES = 450
@@ -24,8 +24,8 @@ const HEADING = 0
 const MODE = (false, false, false, false, false, false)
 const ACTION = :forward
 const OBSTACLES = ((2, 3), (4, 4))
-# nothing generates simulated counts using COUNT_SEED and N_TWOS above.
-# Or supply actual integer counts >= 1 for ONE row (r,m,a), in successor order.
+# nothing generates simulated counts using COUNT_SEED and N_THREES above.
+# Or supply actual integer counts >= 2 for ONE row (r,m,a), in successor order.
 const DIRICHLET_INPUT = nothing
 # nothing enumerates current/north/east/south/west tiles, each with headings
 # 0/90/180/270 and all feasible successor modes.
@@ -107,11 +107,11 @@ function neighborhood_successors(pomdp, config, mode)
 end
 
 """Generate a synthetic phi snapshot; never execute transitions or update counts."""
-function simulated_counts(dimension; n_twos=N_TWOS, seed=COUNT_SEED)
-    0 <= n_twos <= dimension || throw(ArgumentError("N_TWOS must be between 0 and the row dimension"))
-    counts = ones(Int, dimension)
-    selected = randperm(MersenneTwister(seed), dimension)[1:n_twos]
-    counts[selected] .= 2
+function simulated_counts(dimension; n_threes=N_THREES, seed=COUNT_SEED)
+    0 <= n_threes <= dimension || throw(ArgumentError("N_THREES must be between 0 and the row dimension"))
+    counts = fill(2, dimension)
+    selected = randperm(MersenneTwister(seed), dimension)[1:n_threes]
+    counts[selected] .= 3
     return counts
 end
 
@@ -121,15 +121,15 @@ function manual_snapshot(pomdp, config, mode, action, successors, dirichlet_inpu
         throw(ArgumentError("DIRICHLET_INPUT must have one count per SUCCESSOR_INPUT entry"))
     length(dirichlet_input) >= 3 ||
         throw(ArgumentError("a ternary visualization needs at least three successor entries"))
-    all(a -> a isa Real && isfinite(a) && a >= 1 && isinteger(a), dirichlet_input) ||
-        throw(ArgumentError("DIRICHLET_INPUT must contain integer counts >= 1"))
+    all(a -> a isa Real && isfinite(a) && a >= 2 && isinteger(a), dirichlet_input) ||
+        throw(ArgumentError("DIRICHLET_INPUT must contain integer counts >= 2 for model snapshots; use test_hdr_visualization.jl for generic parameters"))
     source = adaptive_state(pomdp, config, mode)
     is_terminal(source) && throw(ArgumentError("choose a nonterminal source configuration"))
     keys = [CountKey(source.config, source.mode, action, rp, mp) for (rp, mp) in successors]
     length(unique(keys)) == length(keys) || throw(ArgumentError("successor entries must be distinct"))
-    # DirichletCounts stores phi-1 internally; this conversion does not simulate
+    # DirichletCounts stores phi-2 internally; this conversion does not simulate
     # observations. count_value(phi,key) is exactly the supplied phi entry.
-    counts = DirichletCounts(Dict(key => Int(a) - 1 for (key, a) in zip(keys, dirichlet_input)))
+    counts = DirichletCounts(Dict(key => Int(a) - 2 for (key, a) in zip(keys, dirichlet_input)))
     return adaptive_state(pomdp, source.config, source.mode, counts)
 end
 
@@ -201,14 +201,14 @@ function run_checks(experiment, samples, curves)
         @test Set(config.heading for (config, _) in support) == Set((0, 90, 180, 270))
         @test all(count(pair -> pair[2] == mode, support) == 20
                   for mode in successor_modes(NOMINAL_MODE))
-        phi = simulated_counts(140; n_twos=10, seed=42)
-        @test count(==(1), phi) == 130
-        @test count(==(2), phi) == 10
-        @test phi == simulated_counts(140; n_twos=10, seed=42)
+        phi = simulated_counts(140; n_threes=10, seed=42)
+        @test count(==(2), phi) == 130
+        @test count(==(3), phi) == 10
+        @test phi == simulated_counts(140; n_threes=10, seed=42)
         informative_groups = density_groups(phi)
-        @test [sum(phi[g]) for g in informative_groups] == [10,10,130]
-        @test all(phi[i] == 2 for g in informative_groups[1:2] for i in g)
-        @test Set(informative_groups[3]) == Set(findall(==(1),phi))
+        @test informative_groups == balanced_groups(phi)
+        @test sort(vcat(informative_groups...)) == collect(1:140)
+        @test all(sum(phi[g] .- 1) > 0 for g in informative_groups)
         @test density_groups(ones(6)) == balanced_groups(ones(6))
         @test density_groups([2,1,1,1]) == [[1],[2,4],[3]]
         @test density_groups([2,2,1]) == [[1],[2],[3]]
@@ -217,7 +217,7 @@ function run_checks(experiment, samples, curves)
         @test density_score(0.0,2.0) == 0.0
         @test density_score(2.0,2.0) == 0.5
         @test density_score(1e300,1e300) == 0.5
-        @test_throws ArgumentError simulated_counts(140; n_twos=141)
+        @test_throws ArgumentError simulated_counts(140; n_threes=141)
         @test_throws ArgumentError neighborhood_successors(model, DSState([1, 1], 0), NOMINAL_MODE)
         @test e.state.config == DSState(ROBOT_POSITION, HEADING)
         @test e.state.mode == MODE
@@ -305,11 +305,12 @@ function run_checks(experiment, samples, curves)
             end
         end
         # A separate uniform-input edge-case check, not a second figure or update.
-        uniform = manual_snapshot(e.pomdp, e.state.config, e.state.mode,
-                                  e.action, e.successors, ones(Int, length(e.successors)))
-        uniform_hdr = build_row_hdr(e.pomdp, uniform, e.action, e.successors;
-            epsilon=EPSILON, n_samples=100, rng=MersenneTwister(SEED))
-        @test isempty(uniform.counts.increments)
+        # This is an explicit generic Dirichlet fixture, not a model snapshot:
+        # the model itself now starts at two and cannot represent count one.
+        flat = DS.hdr_distribution(ones(length(e.successors)))
+        uniform_hdr = DS.DirichletHDR(flat, copy(e.successors), EPSILON, 100,
+            estimate_tau(flat; epsilon=EPSILON, n_samples=100, rng=MersenneTwister(SEED)))
+        @test isempty(adaptive_state(e.pomdp, e.state.config, e.state.mode).counts.increments)
         @test isempty(projected_contours(uniform_hdr, e.groups, 20))
         @test all(projected_contains(uniform_hdr, e.groups, q)
                   for q in ([1.0,0,0], [0.0,1,0], [0.0,0,1], [1/3,1/3,1/3]))
@@ -457,7 +458,7 @@ function make_figure(e, samples, curves)
     add_simplex!(elements, e.hdr, e.groups, samples, curves, 560.0,
         "Grouping: $(e.grouping)")
     push!(elements, label(45, 738,
-        "Counts: $(count(==(1), e.input_counts)) ones, $(count(==(2), e.input_counts)) twos"; size=11))
+        "Counts: $(count(==(2), e.input_counts)) twos, $(count(==(3), e.input_counts)) threes"; size=11))
     push!(elements, label(45, 764,
         "Group totals: " * join([sum(e.input_counts[g]) for g in e.groups], ", "); size=11))
     if e.grouping == :density && all(e.input_counts[i] > 1 for g in e.groups[1:2] for i in g) &&
@@ -530,7 +531,7 @@ function write_report(e, samples, comparison)
     open(joinpath(OUTPUT_DIR, "report.txt"), "w") do io
         println(io, "Given-step manual Dirichlet input: projection of the original full-dimensional 95% HDR")
         println(io, "Settings: K=$K, epsilon=$EPSILON, seed=$SEED, resolution=$GRID_RESOLUTION")
-        println(io, "Count input: ", isnothing(DIRICHLET_INPUT) ? "simulated phi snapshot; COUNT_SEED=$COUNT_SEED, N_TWOS=$N_TWOS" : "manually supplied phi snapshot")
+        println(io, "Count input: ", isnothing(DIRICHLET_INPUT) ? "simulated phi snapshot; COUNT_SEED=$COUNT_SEED, N_THREES=$N_THREES" : "manually supplied phi snapshot")
         println(io, "Source: r=$(e.state.config), m=$(e.state.mode), action=$ACTION")
         println(io, "Input counts: $(e.input_counts)")
         println(io, "Support: ", isnothing(SUCCESSOR_INPUT) ? "current tile + four neighbors, four headings, feasible successor modes" : "explicit manually supplied support")

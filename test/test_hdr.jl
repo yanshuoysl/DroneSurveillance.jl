@@ -38,40 +38,41 @@ end
     end
 
     @testset "Hyperstate row and continuous membership" begin
-        uniform = DS.build_row_hdr(model, s, 1, successors;
+        symmetric = DS.build_row_hdr(model, s, 1, successors;
                                   epsilon=0.05, n_samples=100, rng=MersenneTwister(1))
-        @test uniform.distribution.alpha == [1, 1]
-        @test uniform.successors == successors
-        @test uniform.epsilon == 0.05
-        @test uniform.n_samples == 100
-        @test uniform.tau == 1.0
-        @test DS.contains(uniform, [0.0, 1.0])
-        @test DS.contains(uniform, [1.0, 0.0])
-        @test [0.123456789, 0.876543211] in uniform
-        @test !DS.contains(uniform, [-0.1, 1.1])
-        @test !DS.contains(uniform, [0.1, 0.2])
-        @test !DS.contains(uniform, [1.0])
-        @test !DS.contains(uniform, [NaN, 0.0])
-        @test !DS.contains(uniform, [Inf, 0.0])
-        @test !DS.contains(uniform, [1.0 + 1e-10, 0.0])
+        @test symmetric.distribution.alpha == [2, 2]
+        @test symmetric.successors == successors
+        @test symmetric.epsilon == 0.05
+        @test symmetric.n_samples == 100
+        @test 0 < symmetric.tau < 1.5
+        @test !DS.contains(symmetric, [0.0, 1.0])
+        @test !DS.contains(symmetric, [1.0, 0.0])
+        @test [0.5, 0.5] in symmetric
+        @test !DS.contains(symmetric, [-0.1, 1.1])
+        @test !DS.contains(symmetric, [0.1, 0.2])
+        @test !DS.contains(symmetric, [1.0])
+        @test !DS.contains(symmetric, [NaN, 0.0])
+        @test !DS.contains(symmetric, [Inf, 0.0])
+        @test !DS.contains(symmetric, [1.0 + 1e-10, 0.0])
 
         key = DS.CountKey(s.config, nominal, 1, rp, nominal)
         phi = DS.increment_count(s.counts, key)
         learned = DS.AdaptiveState(s.config, nominal, phi)
         hdr = DS.build_row_hdr(model, learned, 1, successors;
                               epsilon=0.1, n_samples=5_000, rng=MersenneTwister(4))
-        @test hdr.distribution.alpha == [2, 1]
+        @test hdr.distribution.alpha == [3, 2]
         @test isempty(s.counts.increments)
-        @test DS.count_value(learned.counts, key) == 2
-        @test [1.0, 0.0] in hdr
+        @test DS.count_value(learned.counts, key) == 3
+        @test !([1.0, 0.0] in hdr)
         @test !([0.0, 1.0] in hdr)
         @test [0.7, 0.3] in hdr
 
         reversed = DS.build_row_hdr(model, learned, 1, reverse(successors);
                                    epsilon=0.1, n_samples=100, rng=MersenneTwister(4))
-        @test reversed.distribution.alpha == [1, 2]
+        @test reversed.distribution.alpha == [2, 3]
         @test reversed.successors == reverse(successors)
-        @test [0.0, 1.0] in reversed
+        @test !([0.0, 1.0] in reversed)
+        @test [1 / 3, 2 / 3] in reversed
         @test !([1.0, 0.0] in reversed)
 
         # The object snapshots the successor list and the counts at construction.
@@ -80,7 +81,7 @@ end
         @test hdr.successors == saved
         successors[1] = saved[1]
         learned.counts.increments[key] = 20
-        @test hdr.distribution.alpha == [2, 1]
+        @test hdr.distribution.alpha == [3, 2]
 
         # Fresh samples check approximate posterior coverage, not a guarantee.
         held_out = rand(MersenneTwister(99), hdr.distribution, 10_000)

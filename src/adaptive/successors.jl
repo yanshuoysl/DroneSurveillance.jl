@@ -25,9 +25,6 @@ function support_source(pomdp::DroneSurveillancePOMDP, config::DSState,
     source = adaptive_state(pomdp, config, mode)
     config == source.config ||
         throw(ArgumentError("source must be a free grid configuration or UNSAFE_CONFIG"))
-    if !is_terminal(source) && !command_in_bounds(pomdp, config, action)
-        throw(ArgumentError("action would move outside the grid boundary"))
-    end
     return source
 end
 
@@ -50,8 +47,8 @@ support does not imply probabilistic independence of configuration and mode.
 Modes stay unchanged or gain one fault, without recovery. No sideways slip,
 extra movement, or unintended rotation is included.
 
-Outward boundary commands are invalid and raise ArgumentError: they have no
-learned row, including no stay branch. Obstacle contact maps to `UNSAFE_CONFIG`.
+All six actions have learned rows at every active pose. Boundary crossing and
+obstacle contact map to `UNSAFE_CONFIG`, alongside the possible stay branch.
 Goal and unsafe sources are absorbing, returning
 only `(config, mode)` without further degradation. Raw obstacle/outside source
 coordinates are rejected; unsafe sources must already be canonical.
@@ -60,7 +57,6 @@ Ordering is configuration-major: all next modes for staying first, followed by
 all next modes for the commanded configuration. Within each block, the unchanged
 mode comes first, then one new fault in action-ID order. Canonically identical
 configurations are deduplicated. Support is independent of counts/probabilities.
-The legacy DSState simulator still treats obstacle contact as blocked motion.
 """
 function feasible_successors(pomdp::DroneSurveillancePOMDP, config::DSState,
                              mode::FaultMode, action::Integer)
@@ -86,7 +82,6 @@ function is_feasible_successor(pomdp::DroneSurveillancePOMDP, config::DSState,
     if is_terminal(source)
         return next_config == config && next_mode == mode
     end
-    command_in_bounds(pomdp, config, action) || return false
     is_successor_mode(mode, next_mode) || return false
     return next_config in successor_configs(pomdp, config, action)
 end

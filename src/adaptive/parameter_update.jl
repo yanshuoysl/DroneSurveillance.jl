@@ -11,8 +11,8 @@ other count vector. Query this factor with `pdf(distribution, candidate_counts)`
 
 The delta has one entry equal to 1 and all other entries equal to 0. Only that
 joint transition's count is incremented; all other destinations, modes, actions,
-and source rows retain their counts. The implicit prior of one is preserved by
-incrementing the sparse phi-1 storage entry. Stay transitions and entry into
+and source rows retain their counts. The implicit prior of two is preserved by
+incrementing the sparse phi-2 storage entry. Stay transitions and entry into
 goal/unsafe outcomes also increment their own count once.
 
 The resulting DirichletCounts owns a new dictionary. Input counts and sibling

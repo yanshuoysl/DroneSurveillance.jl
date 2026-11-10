@@ -77,13 +77,13 @@ end
         end
     end
 
-    @testset "Outward boundary commands have no reward transition" begin
+    @testset "Executed boundary crossings cost 100; staying costs one" begin
         for (action, position) in enumerate(((3, 5), (3, 1), (1, 3), (5, 3)))
             s = DS.adaptive_state(model, DS.DSState(position, 0))
             for mode in DS.successor_modes(nominal)
                 outside = DS.adaptive_state(model, DS.UNSAFE_CONFIG, mode)
-                @test_throws ArgumentError DS.adaptive_reward(model, s, action, outside)
-                @test_throws ArgumentError DS.adaptive_reward(model, s, action, DS.adaptive_state(model, s.config, mode))
+                @test DS.adaptive_reward(model, s, action, outside) == -100.0
+                @test DS.adaptive_reward(model, s, action, DS.adaptive_state(model, s.config, mode)) == -1.0
             end
         end
     end
